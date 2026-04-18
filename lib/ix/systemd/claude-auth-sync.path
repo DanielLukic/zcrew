@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch Claude and Codex auth files for changes
+
+[Path]
+PathModified=%h/.claude/.credentials.json
+PathModified=%h/.claude.json
+PathModified=%h/.codex/auth.json
+
+[Install]
+WantedBy=default.target

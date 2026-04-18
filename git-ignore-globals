@@ -1,0 +1,25 @@
+# zcrew-managed files (installed by zcrew install)
+.bx/
+.zcrew/
+.agents/skills/zcrew/
+lib/zcrew/
+bin/zcrew
+bin/bx
+bin/ix
+.config/mise.toml
+.claude/skills/zcrew
+.claude/skills/zspawn/
+.claude/skills/zsend/
+.claude/skills/zpanes/
+.claude/skills/zsync/
+.claude/skills/zname/
+.claude/skills/zclose/
+.pi/skills/zcrew
+.pi/skills/zspawn/
+.pi/skills/zsend/
+.pi/skills/zpanes/
+.pi/skills/zsync/
+.pi/skills/zname/
+.pi/skills/zclose/
+.codex/skills/zcrew
+.codex/rules/default.rules

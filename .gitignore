@@ -1,0 +1,21 @@
+.tmp/
+.codex
+.env
+.claude/settings.local.json
+.claude/skills/linear
+.linear.conf
+.nca
+
+# Local dev notes
+CLAUDE.local.md
+AGENTS.local.md
+
+# Personal install helper
+install-all.sh
+
+# Personal TODO scratch
+TODO.md
+
+# Linear skill vendored binary
+.claude/skills/linear/vendor/
+!.claude/skills/linear/vendor/.gitkeep

@@ -1,0 +1,39 @@
+#!/bin/bash
+set -euo pipefail
+
+container_home="$(getent passwd "$(id -u)" | cut -d: -f6)"
+container_home="${container_home:-$HOME}"
+
+# Sync claudeAiOauth.accessToken -> ~/.pi/agent/auth.json anthropic.access
+# so pi-sub-bar can show Claude plan usage
+python3 - <<'PYEOF'
+import json, sys
+from pathlib import Path
+try:
+    creds_path = Path.home() / '.claude' / '.credentials.json'
+    auth_path  = Path.home() / '.pi' / 'agent' / 'auth.json'
+    if creds_path.exists() and auth_path.exists():
+        token = json.loads(creds_path.read_text()).get('claudeAiOauth', {}).get('accessToken', '')
+        if token:
+            auth = json.loads(auth_path.read_text())
+            if auth.get('anthropic', {}).get('access') != token:
+                auth.setdefault('anthropic', {})['access'] = token
+                auth_path.write_text(json.dumps(auth, indent=2))
+                print('claude-auth-sync: updated anthropic.access in auth.json')
+except Exception as e:
+    print(f'claude-auth-sync: anthropic.access sync failed: {e}', file=sys.stderr)
+PYEOF
+
+for container in $(incus list --format csv -c n,s | grep ",RUNNING" | cut -d, -f1); do
+    if incus config device show "$container" 2>/dev/null | grep -q "^claude-creds:"; then
+        incus exec "$container" -- bash -c "cat > \"$container_home/.claude/.credentials.json\"" < "$HOME/.claude/.credentials.json"
+        incus exec "$container" -- bash -c "cat > \"$container_home/.claude.json\"" < "$HOME/.claude.json"
+        echo "claude-auth-sync: synced claude to $container"
+    fi
+    if [[ -f "$HOME/.codex/auth.json" ]]; then
+        if incus exec "$container" -- test -d "$container_home/.codex" 2>/dev/null; then
+            incus exec "$container" -- bash -c "cat > \"$container_home/.codex/auth.json\"" < "$HOME/.codex/auth.json"
+            echo "claude-auth-sync: synced codex to $container"
+        fi
+    fi
+done

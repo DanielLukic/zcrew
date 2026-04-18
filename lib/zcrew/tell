@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+pane_id="${1:-}"
+shift || true
+text="${*:-}"
+
+if [[ -z "${pane_id:-}" || ! "$pane_id" =~ ^[0-9]+$ || -z "${text:-}" ]]; then
+  echo "usage: tell <pane_id> <text>" >&2
+  exit 1
+fi
+
+# Use bracketed paste so zellij inserts the text literally without triggering
+# editor auto-indent or shell binds. Then submit with Enter.
+zellij action write 27 91 50 48 48 126 --pane-id "$pane_id"
+zellij action write-chars "$text" --pane-id "$pane_id"
+zellij action write 27 91 50 48 49 126 --pane-id "$pane_id"
+sleep 0.15
+zellij action write 13 --pane-id "$pane_id"
