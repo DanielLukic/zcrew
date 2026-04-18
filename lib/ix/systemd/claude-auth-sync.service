@@ -1,0 +1,6 @@
+[Unit]
+Description=Sync Claude auth files to running Incus containers
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sg incus-admin -c "%h/.local/bin/claude-auth-sync"

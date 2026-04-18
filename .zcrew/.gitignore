@@ -1,0 +1,6 @@
+registry.json
+registry.json.tmp.*
+registry.lock
+audit.log
+spawn/
+outbox/

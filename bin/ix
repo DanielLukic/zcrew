@@ -1,0 +1,731 @@
+#!/bin/bash
+set -euo pipefail
+[[ -n "${IX_INSIDE:-}" ]] && { echo "ix: already inside an ix container" >&2; exit 1; }
+[[ -n "${BX_INSIDE:-}" ]] && { echo "ix: cannot run inside a bx sandbox (no incus socket)" >&2; exit 1; }
+export IX_INSIDE=1
+
+# ix — project-aware Incus container manager
+# Usage: ix <command> [args...]
+
+PROJECT_DIR="$(pwd)"
+if [[ -d "$PROJECT_DIR/.incus" ]] && [[ ! -d "$PROJECT_DIR/.ix" ]]; then
+    if mv "$PROJECT_DIR/.incus" "$PROJECT_DIR/.ix"; then
+        echo "ix: migrated legacy .incus/ → .ix/ in $PROJECT_DIR" >&2
+    else
+        echo "ix: failed to migrate legacy .incus/ → .ix/ in $PROJECT_DIR" >&2
+        exit 1
+    fi
+elif [[ -d "$PROJECT_DIR/.incus" ]] && [[ -d "$PROJECT_DIR/.ix" ]]; then
+    echo "ix: both .incus/ and .ix/ exist in $PROJECT_DIR; using .ix/, leaving .incus/ as-is" >&2
+fi
+
+CONFIG_DIR="$PROJECT_DIR/.ix"
+CONFIG_FILE="$CONFIG_DIR/config"
+MOUNTS_FILE="$CONFIG_DIR/mounts"
+CONTAINER_USER="$(id -un)"
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
+CONTAINER_HOME="/home/$CONTAINER_USER"
+
+trim() {
+    local s="$1"
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    printf '%s' "${s%$'\r'}"
+}
+
+expand_path() {
+    local p="$1"
+    case "$p" in
+        "~") printf '%s' "$HOME" ;;
+        ~/*) printf '%s' "$HOME/${p#~/}" ;;
+        *) printf '%s' "$p" ;;
+    esac
+}
+
+# Mount parser ported from bin/bx — keep in sync.
+parse_mount_line() {
+    local raw="$1"
+    local cleaned
+    cleaned="$(trim "$raw")"
+
+    [[ -z "$cleaned" || "$cleaned" == \#* ]] && return 1
+
+    local src="" dst="" mode="ro" extra=""
+
+    # Legacy format compatibility: src:dst[:ro|rw]
+    if [[ "$cleaned" == *:* && "$cleaned" != *" "* && "$cleaned" != *$'\t'* ]]; then
+        IFS=':' read -r src dst mode extra <<< "$cleaned"
+        [[ -z "$src" || -z "$dst" || -n "${extra:-}" ]] && return 1
+        [[ -n "${mode:-}" && "$mode" != "ro" && "$mode" != "rw" ]] && return 1
+        mode="${mode:-ro}"
+    else
+        local parts=()
+        read -r -a parts <<< "$cleaned"
+        case "${#parts[@]}" in
+            1)
+                src="${parts[0]}"
+                dst="$src"
+                mode="ro"
+                ;;
+            2)
+                src="${parts[0]}"
+                if [[ "${parts[1]}" == "ro" || "${parts[1]}" == "rw" ]]; then
+                    dst="$src"
+                    mode="${parts[1]}"
+                else
+                    dst="${parts[1]}"
+                    mode="ro"
+                fi
+                ;;
+            3)
+                src="${parts[0]}"
+                dst="${parts[1]}"
+                mode="${parts[2]}"
+                [[ "$mode" != "ro" && "$mode" != "rw" ]] && return 1
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    fi
+
+    src="$(expand_path "$src")"
+    dst="$(expand_path "$dst")"
+
+    [[ "$src" == /* && "$dst" == /* ]] || return 1
+
+    printf '%s\t%s\t%s\n' "$src" "$dst" "$mode"
+}
+
+declare -A MOUNT_SRC=()
+declare -A MOUNT_MODE=()
+
+collect_mounts_from_file() {
+    local file="$1"
+    [[ -f "$file" ]] || return 0
+
+    MOUNT_SRC=()
+    MOUNT_MODE=()
+
+    local line parsed src dst mode
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if ! parsed="$(parse_mount_line "$line")"; then
+            continue
+        fi
+        IFS=$'\t' read -r src dst mode <<< "$parsed"
+
+        [[ -e "$src" ]] || continue
+
+        MOUNT_SRC["$dst"]="$src"
+        MOUNT_MODE["$dst"]="$mode"
+    done < "$file"
+}
+
+mount_dst_exists() {
+    local file="$1"
+    local target_dst="$2"
+    local line parsed src dst mode
+    [[ -f "$file" ]] || return 1
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        parsed="$(parse_mount_line "$line" 2>/dev/null || true)"
+        [[ -z "$parsed" ]] && continue
+        IFS=$'\t' read -r src dst mode <<< "$parsed"
+        if [[ "$dst" == "$target_dst" ]]; then
+            return 0
+        fi
+    done < "$file"
+    return 1
+}
+
+add_device() {
+    local container="$1"; shift
+    local name="$1"; shift
+    # Skip if device already exists
+    if incus config device show "$container" 2>/dev/null | grep -q "^${name}:"; then
+        return 0
+    fi
+    incus config device add "$container" "$name" "$@"
+}
+
+setup_mounts() {
+    local container="$1"
+
+    # Project directory (rw)
+    add_device "$container" workspace disk \
+        source="$PROJECT_DIR" path="$WORKDIR"
+
+    # mise runtimes (rw — shared installs)
+    [[ -d "$HOME/.local/share/mise" ]] && \
+        add_device "$container" mise disk \
+            source="$HOME/.local/share/mise" path="$CONTAINER_HOME/.local/share/mise"
+
+    # mise state (rw — tracked-configs and trusted-configs live here)
+    mkdir -p "$HOME/.local/state/mise"
+    add_device "$container" mise-state disk \
+        source="$HOME/.local/state/mise" path="$CONTAINER_HOME/.local/state/mise"
+
+    # User tools (ro) — ~/.local/bin, ~/.local/lib, etc.
+    [[ -d "$HOME/.local" ]] && \
+        add_device "$container" local disk \
+            source="$HOME/.local" path="$CONTAINER_HOME/.local" readonly=true
+
+    # System-local binaries (ro)
+    [[ -d "/usr/local/bin" ]] && \
+        add_device "$container" usr-local-bin disk \
+            source="/usr/local/bin" path="/usr/local/bin" readonly=true
+
+    # Claude binary store (ro)
+    if [[ "${CLAUDE:-on}" == "on" ]]; then
+        [[ -d "$HOME/.local/share/claude" ]] && \
+            add_device "$container" claude-bin disk \
+                source="$HOME/.local/share/claude" path="$CONTAINER_HOME/.local/share/claude" readonly=true
+
+        # Claude auth (linked from host, skips login screen)
+        if [[ -f "$HOME/.claude.json" ]]; then
+            add_device "$container" claude-json disk \
+                source="$HOME/.claude.json" \
+                path="$CONTAINER_HOME/.claude.json"
+        fi
+        if [[ -f "$HOME/.claude/.credentials.json" ]]; then
+            incus exec "$container" -- mkdir -p "$CONTAINER_HOME/.claude"
+            incus exec "$container" -- chown $HOST_UID:$HOST_GID "$CONTAINER_HOME/.claude"
+            add_device "$container" claude-creds disk \
+                source="$HOME/.claude/.credentials.json" \
+                path="$CONTAINER_HOME/.claude/.credentials.json"
+        fi
+    fi
+
+    # Codex auth + config (copied into container on each remount — auth.json replaced atomically on refresh)
+    if [[ "${CODEX:-on}" == "on" ]] && [[ -d "$HOME/.codex" ]]; then
+        incus exec "$container" -- mkdir -p "$CONTAINER_HOME/.codex"
+        incus exec "$container" -- chown $HOST_UID:$HOST_GID "$CONTAINER_HOME/.codex"
+        for f in auth.json config.toml; do
+            [[ -f "$HOME/.codex/$f" ]] && \
+                incus file push "$HOME/.codex/$f" "$container$CONTAINER_HOME/.codex/$f"
+        done
+    fi
+
+    # Git config (ro)
+    [[ -f "$HOME/.gitconfig" ]] && \
+        add_device "$container" gitconfig disk \
+            source="$HOME/.gitconfig" path="$CONTAINER_HOME/.gitconfig" readonly=true
+
+    # mise config (ro)
+    if [[ -d "$HOME/.config/mise" ]]; then
+        incus exec "$container" -- mkdir -p "$CONTAINER_HOME/.config"
+        incus exec "$container" -- chown $HOST_UID:$HOST_GID "$CONTAINER_HOME/.config"
+        add_device "$container" mise-config disk \
+            source="$HOME/.config/mise" path="$CONTAINER_HOME/.config/mise" readonly=true
+    fi
+
+    # Bash aliases (ro)
+    [[ -f "$HOME/.bash_aliases" ]] && \
+        add_device "$container" bash-aliases disk \
+            source="$HOME/.bash_aliases" path="$CONTAINER_HOME/.bash_aliases" readonly=true
+
+    collect_mounts_from_file "$MOUNTS_FILE"
+    local dst src mode dev_name
+    for dst in "${!MOUNT_SRC[@]}"; do
+        src="${MOUNT_SRC[$dst]}"
+        mode="${MOUNT_MODE[$dst]}"
+        dev_name="$(mount_device_name "$dst")"
+        if [[ "$mode" == "ro" ]]; then
+            add_device "$container" "$dev_name" disk \
+                source="$src" path="$dst" readonly=true
+        else
+            add_device "$container" "$dev_name" disk \
+                source="$src" path="$dst"
+        fi
+    done
+}
+
+# Stable device name from dst path — same dst always maps to same device name,
+# so add_device's skip-if-exists semantics and mount rm both work correctly.
+mount_device_name() {
+    local dst="$1" hash
+    hash=$(printf '%s' "$dst" | sha1sum | cut -c1-12)
+    echo "custom-mount-${hash}"
+}
+
+setup_bashrc() {
+    local container="$1"
+    incus exec "$container" -- env CONTAINER_HOME="$CONTAINER_HOME" bash -s <<'BASHRC'
+cat > "$CONTAINER_HOME/.bashrc" <<EOF
+# PATH — tools
+export PATH="$CONTAINER_HOME/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$CONTAINER_HOME/.local/bin:\$PATH"
+
+# mise activation
+if command -v mise &>/dev/null; then
+    eval "\$(mise activate bash)"
+fi
+
+# Bash aliases
+if [[ -f ~/.bash_aliases ]]; then
+    . ~/.bash_aliases
+fi
+
+# Prompt
+export PS1='\[\e[1;32m\]\u@\h\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]\$ '
+
+export TERM="\${TERM:-xterm-256color}"
+export EDITOR="\${EDITOR:-nvim}"
+EOF
+BASHRC
+
+    # .bash_profile sources .bashrc (bash --login doesn't read .bashrc directly)
+    incus exec "$container" -- env CONTAINER_HOME="$CONTAINER_HOME" bash -s <<'BASH_PROFILE'
+cat > "$CONTAINER_HOME/.bash_profile" <<'EOF'
+[[ -f ~/.bashrc ]] && . ~/.bashrc
+EOF
+BASH_PROFILE
+
+    incus exec "$container" -- chown $HOST_UID:$HOST_GID "$CONTAINER_HOME/.bashrc" "$CONTAINER_HOME/.bash_profile"
+    incus exec "$container" -- chown "$CONTAINER_USER:$CONTAINER_USER" "$CONTAINER_HOME" "$CONTAINER_HOME/.local" "$CONTAINER_HOME/.local/share" 2>/dev/null || true
+}
+
+check_storage() {
+    local unavailable
+    unavailable=$(incus storage list 2>/dev/null | awk '/UNAVAILABLE/ {print $2}')
+    if [[ -n "$unavailable" ]]; then
+        echo "Error: Incus storage pool(s) unavailable: $unavailable" >&2
+        echo "       Is the backing storage mounted and the ZFS pool imported?" >&2
+        echo "       Check: zpool status; incus storage list" >&2
+        exit 1
+    fi
+}
+
+cmd_setup() {
+    check_storage
+    if [[ -f "$CONFIG_FILE" ]]; then
+        source "$CONFIG_FILE"
+        echo "Container '$CONTAINER' already configured for this project."
+        if incus info "$CONTAINER" &>/dev/null; then
+            echo "State: $(incus info "$CONTAINER" | grep '^Status:' | awk '{print $2}')"
+            exit 0
+        fi
+        echo "Config exists but container is gone. Recreating..."
+    fi
+
+    CONTAINER="${CONTAINER:-$(basename "$PROJECT_DIR")}"
+    IMAGE="${IMAGE:-images:ubuntu/24.04}"
+    WORKDIR="${WORKDIR:-$CONTAINER_HOME/$(basename "$PROJECT_DIR")}"
+    CLAUDE="${CLAUDE:-on}"
+    CODEX="${CODEX:-on}"
+    CONTAINER=$(echo "$CONTAINER" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
+
+    echo "==> Creating container: $CONTAINER"
+    echo "    Image:   $IMAGE"
+    echo "    Project: $PROJECT_DIR"
+    echo "    Workdir: $WORKDIR"
+    echo ""
+
+    incus launch "$IMAGE" "$CONTAINER"
+    echo "==> Waiting for container..."
+    sleep 3
+
+    # UID mapping
+    printf -v idmap 'uid %s %s\ngid %s %s' "$HOST_UID" "$HOST_UID" "$HOST_GID" "$HOST_GID"
+    incus config set "$CONTAINER" raw.idmap "$idmap"
+    incus restart "$CONTAINER"
+    sleep 3
+
+    # Create the host-matching user (rename ubuntu user if needed)
+    incus exec "$CONTAINER" -- env CONTAINER_USER="$CONTAINER_USER" CONTAINER_HOME="$CONTAINER_HOME" HOST_UID="$HOST_UID" HOST_GID="$HOST_GID" bash -s <<'SETUP_USER'
+EXISTING=$(getent passwd "$HOST_UID" | cut -d: -f1)
+if [[ -n "$EXISTING" && "$EXISTING" != "$CONTAINER_USER" ]]; then
+    usermod -l "$CONTAINER_USER" -d "$CONTAINER_HOME" -m "$EXISTING" 2>/dev/null || true
+    groupmod -n "$CONTAINER_USER" "$EXISTING" 2>/dev/null || true
+elif [[ -z "$EXISTING" ]]; then
+    groupadd -g "$HOST_GID" "$CONTAINER_USER" 2>/dev/null || true
+    useradd -u "$HOST_UID" -g "$HOST_GID" -m -d "$CONTAINER_HOME" -s /bin/bash "$CONTAINER_USER"
+fi
+usermod -d "$CONTAINER_HOME" -s /bin/bash "$CONTAINER_USER"
+echo "$CONTAINER_USER ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/$CONTAINER_USER"
+SETUP_USER
+
+    # Base packages
+    echo "==> Installing base packages..."
+    incus exec "$CONTAINER" -- bash -c "
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
+        apt-get install -y -qq \
+            build-essential pkg-config cmake ninja-build \
+            git curl wget ca-certificates \
+            jq unzip zip tar xz-utils \
+            file less htop strace ripgrep \
+            python3 python3-venv \
+            libssl-dev libffi-dev man-db
+    "
+
+    # Mounts
+    echo "==> Mounting shared resources..."
+    mkdir -p "$CONFIG_DIR"
+    [[ -f "$MOUNTS_FILE" ]] || : > "$MOUNTS_FILE"
+    setup_mounts "$CONTAINER"
+
+    # .bashrc
+    echo "==> Writing .bashrc..."
+    setup_bashrc "$CONTAINER"
+
+    # provision.sh
+    if [[ -f "$CONFIG_DIR/provision.sh" ]]; then
+        echo "==> Running provision.sh..."
+        incus exec "$CONTAINER" -- bash < "$CONFIG_DIR/provision.sh"
+    fi
+
+    mkdir -p "$CONFIG_DIR"
+    cat > "$CONFIG_FILE" <<EOF
+CONTAINER=$CONTAINER
+IMAGE=$IMAGE
+WORKDIR=$WORKDIR
+CLAUDE=$CLAUDE
+CODEX=$CODEX
+EOF
+
+    echo ""
+    echo "==> Done. Container '$CONTAINER' is ready."
+    echo "    ix enter    — shell in"
+    echo "    ix run CMD  — run a command"
+}
+
+load_config() {
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        echo "No .ix/config found in $PROJECT_DIR. Run 'ix setup' first." >&2
+        exit 1
+    fi
+    source "$CONFIG_FILE"
+    local info_out
+    if ! info_out=$(incus info "$CONTAINER" 2>&1); then
+        if echo "$info_out" | grep -q "permission\|socket\|access"; then
+            echo "Permission denied talking to Incus. Are you in the 'incus-admin' group? Try logging out and back in." >&2
+        else
+            echo "Container '$CONTAINER' doesn't exist. Run 'ix setup' first." >&2
+        fi
+        exit 1
+    fi
+}
+
+ensure_running() {
+    local state
+    state=$(incus info "$CONTAINER" | grep '^Status:' | awk '{print $2}')
+    if [[ "$state" != "RUNNING" ]]; then
+        echo "Starting container '$CONTAINER'..." >&2
+        incus start "$CONTAINER"
+        sleep 2
+    fi
+}
+
+has_gui() { incus config device show "$CONTAINER" 2>/dev/null | grep -q "x11-socket"; }
+has_ssh() { incus config device show "$CONTAINER" 2>/dev/null | grep -q "ssh-keys"; }
+write_flag() {
+    local key="$1"
+    local value="$2"
+    if grep -q "^${key}=" "$CONFIG_FILE"; then
+        sed -i "s/^${key}=.*/${key}=${value}/" "$CONFIG_FILE"
+    else
+        echo "${key}=${value}" >> "$CONFIG_FILE"
+    fi
+}
+
+count_mounts() {
+    local count=0 line trimmed src dst mode extra
+    [[ -f "$MOUNTS_FILE" ]] || { echo "0"; return; }
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        trimmed="$line"
+        trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
+        trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+        trimmed="${trimmed%$'\r'}"
+        [[ -z "$trimmed" ]] && continue
+        [[ "$trimmed" == \#* ]] && continue
+        IFS=':' read -r src dst mode extra <<< "$trimmed"
+        [[ -z "$src" || -z "$dst" || -n "${extra:-}" ]] && continue
+        [[ -n "${mode:-}" && "$mode" != "ro" ]] && continue
+        count=$((count + 1))
+    done < "$MOUNTS_FILE"
+    echo "$count"
+}
+
+cmd_enter() {
+    load_config
+    ensure_running
+    local env_args=(--user "$HOST_UID" --group "$HOST_GID" --cwd "$WORKDIR" --env "HOME=$CONTAINER_HOME" --env "TERM=${TERM:-xterm-256color}")
+    if has_gui; then env_args+=(--env "DISPLAY=$DISPLAY"); fi
+    exec incus exec "$CONTAINER" -t "${env_args[@]}" -- bash --login
+}
+
+cmd_run() {
+    [[ $# -eq 0 ]] && { echo "Usage: ix run <command> [args...]" >&2; exit 1; }
+    load_config
+    ensure_running
+    local env_args=(--user "$HOST_UID" --group "$HOST_GID" --cwd "$WORKDIR" --env "HOME=$CONTAINER_HOME" --env "TERM=${TERM:-xterm-256color}")
+    if has_gui; then env_args+=(--env "DISPLAY=$DISPLAY"); fi
+    exec incus exec "$CONTAINER" "${env_args[@]}" -- bash --login -c "$*"
+}
+
+cmd_gui() {
+    local action="${1:-}"
+    load_config
+    case "$action" in
+        on)
+            has_gui && { echo "GUI already enabled."; exit 0; }
+            incus config device add "$CONTAINER" x11-socket disk source=/tmp/.X11-unix path=/tmp/.X11-unix
+            echo "GUI enabled for '$CONTAINER'."
+            ;;
+        off)
+            ! has_gui && { echo "GUI already disabled."; exit 0; }
+            incus config device remove "$CONTAINER" x11-socket
+            echo "GUI disabled for '$CONTAINER'."
+            ;;
+        *) has_gui && echo "GUI: on" || echo "GUI: off" ;;
+    esac
+}
+
+cmd_ssh() {
+    local action="${1:-}"
+    load_config
+    case "$action" in
+        on)
+            has_ssh && { echo "SSH already enabled."; exit 0; }
+            incus config device add "$CONTAINER" ssh-keys disk \
+                source="$HOME/.ssh" path="$CONTAINER_HOME/.ssh" readonly=true
+            echo "SSH keys mounted (read-only) for '$CONTAINER'."
+            ;;
+        off)
+            ! has_ssh && { echo "SSH already disabled."; exit 0; }
+            incus config device remove "$CONTAINER" ssh-keys
+            echo "SSH keys unmounted for '$CONTAINER'."
+            ;;
+        *) has_ssh && echo "SSH: on" || echo "SSH: off" ;;
+    esac
+}
+
+cmd_claude() {
+    local action="${1:-}"
+    load_config
+    case "$action" in
+        on)
+            write_flag CLAUDE on
+            source "$CONFIG_FILE"
+            setup_mounts "$CONTAINER"
+            echo "Claude handling enabled for '$CONTAINER'."
+            ;;
+        off)
+            write_flag CLAUDE off
+            incus config device show "$CONTAINER" 2>/dev/null | grep -q "^claude-bin:" && \
+                incus config device remove "$CONTAINER" claude-bin || true
+            incus config device show "$CONTAINER" 2>/dev/null | grep -q "^claude-json:" && \
+                incus config device remove "$CONTAINER" claude-json || true
+            incus config device show "$CONTAINER" 2>/dev/null | grep -q "^claude-creds:" && \
+                incus config device remove "$CONTAINER" claude-creds || true
+            echo "Claude handling disabled for '$CONTAINER'."
+            ;;
+        *)
+            source "$CONFIG_FILE"
+            echo "CLAUDE: ${CLAUDE:-on}"
+            ;;
+    esac
+}
+
+cmd_codex() {
+    local action="${1:-}"
+    load_config
+    case "$action" in
+        on)
+            write_flag CODEX on
+            source "$CONFIG_FILE"
+            setup_mounts "$CONTAINER"
+            echo "Codex handling enabled for '$CONTAINER'."
+            ;;
+        off)
+            write_flag CODEX off
+            incus exec "$CONTAINER" -- rm -f "$CONTAINER_HOME/.codex/auth.json" "$CONTAINER_HOME/.codex/config.toml" 2>/dev/null || true
+            echo "Codex handling disabled for '$CONTAINER'."
+            ;;
+        *)
+            source "$CONFIG_FILE"
+            echo "CODEX: ${CODEX:-on}"
+            ;;
+    esac
+}
+
+cmd_mount() {
+    load_config
+    mkdir -p "$CONFIG_DIR"
+    [[ -f "$MOUNTS_FILE" ]] || : > "$MOUNTS_FILE"
+
+    local action="${1:-}"
+    case "$action" in
+        add)
+            shift
+            local src="${1:-}" dst="" mode="ro"
+            [[ -n "$src" ]] || { echo "Usage: ix mount add <src> [dst] [ro|rw]" >&2; exit 1; }
+            shift || true
+
+            case "$#" in
+                0)
+                    dst="$src"
+                    ;;
+                1)
+                    if [[ "$1" == "ro" || "$1" == "rw" ]]; then
+                        dst="$src"
+                        mode="$1"
+                    else
+                        dst="$1"
+                    fi
+                    ;;
+                2)
+                    dst="$1"
+                    mode="$2"
+                    ;;
+                *)
+                    echo "Usage: ix mount add <src> [dst] [ro|rw]" >&2
+                    exit 1
+                    ;;
+            esac
+
+            src="$(expand_path "$src")"
+            dst="$(expand_path "$dst")"
+
+            if [[ "$src" != /* || "$dst" != /* ]]; then
+                echo "Mount paths must be absolute." >&2
+                exit 1
+            fi
+            if [[ "$mode" != "ro" && "$mode" != "rw" ]]; then
+                echo "Mode must be ro or rw." >&2
+                exit 1
+            fi
+            if mount_dst_exists "$MOUNTS_FILE" "$dst"; then
+                echo "Mount destination '$dst' already exists. Remove it first with: ix mount rm $dst" >&2
+                exit 1
+            fi
+
+            if [[ "$dst" == "$src" && "$mode" == "ro" ]]; then
+                echo "$src" >> "$MOUNTS_FILE"
+            elif [[ "$mode" == "ro" ]]; then
+                echo "$src $dst" >> "$MOUNTS_FILE"
+            else
+                echo "$src $dst rw" >> "$MOUNTS_FILE"
+            fi
+            echo "Mount added."
+            ;;
+        rm)
+            local dst="${2:-}"
+            if [[ -z "$dst" || $# -ne 2 ]]; then
+                echo "Usage: ix mount rm <dst>" >&2
+                exit 1
+            fi
+            dst="$(expand_path "$dst")"
+
+            local tmp
+            tmp=$(mktemp)
+            local line parsed src parsed_dst mode
+            while IFS= read -r line || [[ -n "$line" ]]; do
+                parsed="$(parse_mount_line "$line" 2>/dev/null || true)"
+                if [[ -z "$parsed" ]]; then
+                    echo "$line" >> "$tmp"
+                    continue
+                fi
+                IFS=$'\t' read -r src parsed_dst mode <<< "$parsed"
+                [[ "$parsed_dst" == "$dst" ]] && continue
+                echo "$line" >> "$tmp"
+            done < "$MOUNTS_FILE"
+            mv "$tmp" "$MOUNTS_FILE"
+            # Also remove the live device if container exists (stable name = known device)
+            if [[ -f "$CONFIG_FILE" ]]; then
+                source "$CONFIG_FILE"
+                local dev_name
+                dev_name="$(mount_device_name "$dst")"
+                if incus config device show "$CONTAINER" 2>/dev/null | grep -q "^${dev_name}:"; then
+                    incus config device remove "$CONTAINER" "$dev_name" >/dev/null 2>&1 || true
+                fi
+            fi
+            echo "Mount(s) removed for destination: $dst"
+            ;;
+        list)
+            cat "$MOUNTS_FILE"
+            ;;
+        *)
+            echo "Usage:"
+            echo "  ix mount add <src> [dst] [ro|rw]"
+            echo "  ix mount rm <dst>"
+            echo "  ix mount list"
+            ;;
+    esac
+}
+
+cmd_remount() {
+    load_config
+    ensure_running
+    echo "==> Rewriting .bashrc and re-applying mounts for '$CONTAINER'..."
+    # Remove existing managed devices (skip workspace/mise which are always rw)
+    for dev in local local-bin local-lib usr-local-bin claude-bin claude-json claude-creds gitconfig mise-config mise-state bash-aliases; do
+        incus config device show "$CONTAINER" 2>/dev/null | grep -q "^$dev:" && \
+            incus config device remove "$CONTAINER" "$dev" || true
+    done
+    local dev
+    while IFS= read -r dev; do
+        [[ "$dev" =~ ^custom-mount-[0-9a-f]{12}:$ ]] || continue
+        incus config device remove "$CONTAINER" "${dev%:}" || true
+    done < <(incus config device show "$CONTAINER" 2>/dev/null)
+    setup_mounts "$CONTAINER"
+    setup_bashrc "$CONTAINER"
+    echo "==> Done."
+}
+
+cmd_stop() {
+    load_config
+    incus stop "$CONTAINER"
+    echo "Stopped '$CONTAINER'."
+}
+
+cmd_status() {
+    load_config
+    incus info "$CONTAINER" | grep -E '^(Name|Status|Type|Created|Last Used):'
+    echo "CLAUDE: ${CLAUDE:-on}"
+    echo "CODEX:  ${CODEX:-on}"
+    echo "MOUNTS: $(count_mounts)"
+    echo ""
+    incus config device show "$CONTAINER"
+}
+
+cmd_destroy() {
+    load_config
+    read -rp "Destroy container '$CONTAINER'? Project files are safe. [y/N] " confirm
+    [[ "$confirm" =~ ^[yY]$ ]] || exit 0
+    incus delete "$CONTAINER" --force
+    echo "Destroyed '$CONTAINER'."
+}
+
+case "${1:-}" in
+    setup)   cmd_setup ;;
+    enter)   cmd_enter ;;
+    run)     shift; cmd_run "$@" ;;
+    gui)     shift; cmd_gui "$@" ;;
+    ssh)     shift; cmd_ssh "$@" ;;
+    mount)   shift; cmd_mount "$@" ;;
+    claude)  shift; cmd_claude "$@" ;;
+    codex)   shift; cmd_codex "$@" ;;
+    remount) cmd_remount ;;
+    stop)    cmd_stop ;;
+    status)  cmd_status ;;
+    destroy) cmd_destroy ;;
+    *)
+        echo "ix — project-aware Incus container manager"
+        echo ""
+        echo "Commands:"
+        echo "  setup          Create container for current project"
+        echo "  enter          Shell into container"
+        echo "  run CMD        Run a command inside container"
+        echo "  gui [on|off]   Toggle X11 forwarding"
+        echo "  ssh [on|off]   Toggle ~/.ssh mount (read-only)"
+        echo "  mount ...      Manage extra mounts (add/rm/list)"
+        echo "  claude [on|off] Toggle Claude auth/mount handling"
+        echo "  codex [on|off]  Toggle Codex auth/config handling"
+        echo "  remount        Re-apply all mounts + rewrite .bashrc"
+        echo "  stop           Stop the container"
+        echo "  status         Show container state and devices"
+        echo "  destroy        Remove container (project files are safe)"
+        ;;
+esac

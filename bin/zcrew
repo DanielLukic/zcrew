@@ -1,0 +1,1076 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+find_project_root() {
+  local dir="${1:-$PWD}"
+  while true; do
+    if [[ -d "$dir/.zcrew" ]]; then
+      printf '%s\n' "$dir"
+      return 0
+    fi
+    if [[ "$dir" == "/" ]]; then
+      return 1
+    fi
+    dir="$(dirname "$dir")"
+  done
+}
+
+PROJECT_DIR="$(find_project_root "$PWD" || echo "$PWD")"
+STATE_DIR="$PROJECT_DIR/.zcrew"
+REGISTRY_FILE="$STATE_DIR/registry.json"
+LOCK_FILE="$STATE_DIR/registry.lock"
+SPAWN_DIR="$STATE_DIR/spawn"
+AUDIT_FILE="$STATE_DIR/audit.log"
+BX_DIR="$PROJECT_DIR/.bx"
+CURRENT_SUBCMD="main"
+ZCREW_AUTO_SYNC="${ZCREW_AUTO_SYNC:-1}"
+ZCREW_PROJECT_READY=0
+
+if [[ "${ZCREW_DEBUG:-0}" == "1" ]]; then
+  PS4='+[$(date +%H:%M:%S.%N) $$ ${FUNCNAME[0]:-main}]+ '
+  set -x
+fi
+
+logger() {
+  local audit_rotate_bytes=1048576
+  local subcmd="${1:-main}"
+  local level="${2:-info}"
+  shift 2 || true
+  local msg="$*"
+  [[ -d "$STATE_DIR" ]] || return 0
+  local audit_size
+  audit_size=$(stat -c%s "$AUDIT_FILE" 2>/dev/null || printf '0\n')
+  if [[ "$audit_size" -gt "$audit_rotate_bytes" ]]; then
+    rm -f "$AUDIT_FILE.1"
+    mv "$AUDIT_FILE" "$AUDIT_FILE.1"
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S.%N%z)" "$$" "$subcmd" "$level" "$msg" >> "$AUDIT_FILE"
+}
+
+fail_not_initialized() {
+  echo "zcrew: no .zcrew/ found from $PWD upward — run: zcrew install ." >&2
+  exit 1
+}
+
+require_project() {
+  [[ -d "$STATE_DIR" ]] || fail_not_initialized
+  if [[ "$ZCREW_PROJECT_READY" != "1" ]]; then
+    if [[ "$ZCREW_AUTO_SYNC" == "1" ]]; then
+      logger "$CURRENT_SUBCMD" "info" "auto-sync begin"
+      reconcile_registry_with_zellij "true"
+      logger "$CURRENT_SUBCMD" "info" "auto-sync end"
+    fi
+    ZCREW_PROJECT_READY=1
+  fi
+}
+
+remove_zcrew_sessionstart_hook() {
+  local target_dir="${1:-.}"
+  local settings_dir="$target_dir/.claude"
+  local settings_file="$settings_dir/settings.json"
+  local hook_command='${CLAUDE_PROJECT_DIR}/.claude/hooks/zcrew-register.sh'
+  [[ -f "$settings_file" ]] || return 1
+
+  local tmp="$settings_file.tmp.$$"
+  jq --arg hook "$hook_command" '
+    .hooks = (.hooks // {})
+    | .hooks.SessionStart = (
+        (.hooks.SessionStart // [])
+        | map(
+            .hooks = ((.hooks // []) | map(select(.type != "command" or .command != $hook)))
+          )
+        | map(select((.hooks // []) | length > 0))
+      )
+    | if (.hooks.SessionStart | length) == 0 then
+        .hooks |= del(.SessionStart)
+      else
+        .
+      end
+    | if ((.hooks | keys | length) == 0) then
+        del(.hooks)
+      else
+        .
+      end
+  ' "$settings_file" > "$tmp"
+
+  local before after
+  before=$(cat "$settings_file")
+  after=$(cat "$tmp")
+  if [[ "$before" == "$after" ]]; then
+    rm -f "$tmp"
+    return 1
+  fi
+
+  mv "$tmp" "$settings_file"
+  return 0
+}
+
+mount_line_dst() {
+  local raw="$1"
+  local cleaned="$raw"
+  cleaned="${cleaned#"${cleaned%%[![:space:]]*}"}"
+  cleaned="${cleaned%"${cleaned##*[![:space:]]}"}"
+  [[ -z "$cleaned" || "$cleaned" == \#* ]] && return 1
+
+  if [[ "$cleaned" == *:* && "$cleaned" != *" "* && "$cleaned" != *$'\t'* ]]; then
+    local src dst rest
+    IFS=':' read -r src dst rest <<< "$cleaned"
+    [[ -n "${dst:-}" ]] || return 1
+    printf '%s\n' "$dst"
+    return 0
+  fi
+
+  local parts=()
+  read -r -a parts <<< "$cleaned"
+  case "${#parts[@]}" in
+    1) printf '%s\n' "${parts[0]}" ;;
+    2)
+      if [[ "${parts[1]}" == "ro" || "${parts[1]}" == "rw" ]]; then
+        printf '%s\n' "${parts[0]}"
+      else
+        printf '%s\n' "${parts[1]}"
+      fi
+      ;;
+    *)
+      printf '%s\n' "${parts[1]}"
+      ;;
+  esac
+}
+
+ensure_bx_managed_mounts() {
+  local target_dir="${1:-.}"
+  local bx_dir="$target_dir/.bx"
+  [[ -d "$bx_dir" ]] || return 1
+
+  local mounts_file="$bx_dir/mounts"
+  local zellij_sock_dir="/run/user/$(id -u)/zellij"
+  local managed_dsts=("$zellij_sock_dir")
+  local canonical_lines=("$zellij_sock_dir $zellij_sock_dir rw")
+  if [[ -d "$HOME/.pi" ]]; then
+    managed_dsts+=("$HOME/.pi")
+    canonical_lines+=("$HOME/.pi $HOME/.pi rw")
+  fi
+
+  local tmp="$mounts_file.tmp.$$"
+  local line
+  : > "$tmp"
+  if [[ -f "$mounts_file" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      local dst=""
+      dst=$(mount_line_dst "$line" 2>/dev/null || true)
+      local managed="false"
+      local managed_dst
+      for managed_dst in "${managed_dsts[@]}"; do
+        if [[ "$dst" == "$managed_dst" ]]; then
+          managed="true"
+          break
+        fi
+      done
+      if [[ "$managed" != "true" ]]; then
+        printf '%s\n' "$line" >> "$tmp"
+      fi
+    done < "$mounts_file"
+  fi
+
+  local canonical_line
+  for canonical_line in "${canonical_lines[@]}"; do
+    printf '%s\n' "$canonical_line" >> "$tmp"
+  done
+
+  local before="" after
+  if [[ -f "$mounts_file" ]]; then
+    before=$(cat "$mounts_file")
+  fi
+  after=$(cat "$tmp")
+  if [[ "$before" == "$after" ]]; then
+    rm -f "$tmp"
+    return 1
+  fi
+
+  mv "$tmp" "$mounts_file"
+  return 0
+}
+
+# Detect a stale ZELLIJ_SESSION_NAME — happens when the user renames the
+# zellij session after claude was launched. zellij action commands hang on
+# a stale session name. Fail fast with a clear message.
+require_zellij_session() {
+  if [[ -z "${ZELLIJ_SESSION_NAME:-}" ]]; then
+    echo "zcrew: ZELLIJ_SESSION_NAME not set — not inside a zellij session." >&2
+    exit 1
+  fi
+  if ! zellij list-sessions -s 2>/dev/null | grep -qFx "$ZELLIJ_SESSION_NAME"; then
+    echo "zcrew: ZELLIJ_SESSION_NAME='$ZELLIJ_SESSION_NAME' is stale (session renamed or gone)." >&2
+    echo "       The env var was baked into this pane at creation and cannot be refreshed by restarting claude inside it." >&2
+    echo "       Open a new pane (zellij Alt+n, then start claude there) OR restart zellij entirely." >&2
+    exit 1
+  fi
+}
+
+ensure_registry_files() {
+  mkdir -p "$SPAWN_DIR"
+  : > "$LOCK_FILE"
+  if [[ ! -f "$REGISTRY_FILE" ]]; then
+    printf '{"version":1,"panes":{}}\n' > "$REGISTRY_FILE"
+  fi
+}
+
+ensure_gitignore_lines() {
+  local file="$1"
+  shift
+  local line
+
+  mkdir -p "$(dirname "$file")"
+  [[ -f "$file" ]] || : > "$file"
+  for line in "$@"; do
+    if ! grep -Fxq "$line" "$file"; then
+      printf '%s\n' "$line" >> "$file"
+    fi
+  done
+}
+
+ensure_team_conf_template() {
+  local target_dir="$1"
+  local team_file="$target_dir/.zcrew/team.conf"
+
+  [[ -f "$team_file" ]] && return 0
+
+  mkdir -p "$(dirname "$team_file")"
+  cat > "$team_file" <<'EOF'
+# Team composition — read by the orchestrator at session start.
+# name  agent  model  role
+claudio  claude  sonnet  assistant / researcher
+sam      codex   -       reviewer
+piper    pi      -       implementer
+EOF
+}
+
+write_managed_mise_floor() {
+  local target_dir="$1"
+  local config_dir="$target_dir/.config"
+  local mise_file="$config_dir/mise.toml"
+
+  mkdir -p "$config_dir"
+  cat > "$mise_file" <<EOF
+# Managed by zcrew install — do not edit manually.
+# Project-specific overrides go in .mise.toml (higher precedence).
+[env]
+_.path = ["bin"]
+EOF
+}
+
+registry_write_jq() {
+  local jq_filter="$1"
+  shift
+
+  ensure_registry_files
+  logger "$CURRENT_SUBCMD" "info" "registry_write_jq begin"
+  local tmp
+  tmp=$(mktemp "$STATE_DIR/registry.json.tmp.XXXXXX")
+  (
+    flock -x 9
+    jq "$jq_filter" "$@" "$REGISTRY_FILE" > "$tmp"
+    mv "$tmp" "$REGISTRY_FILE"
+  ) 9>"$LOCK_FILE"
+  logger "$CURRENT_SUBCMD" "info" "registry_write_jq end"
+}
+
+cmd_init() {
+  CURRENT_SUBCMD="init"
+  mkdir -p "$SPAWN_DIR"
+  : > "$LOCK_FILE"
+  if [[ ! -f "$REGISTRY_FILE" ]]; then
+    printf '{"version":1,"panes":{}}\n' > "$REGISTRY_FILE"
+  fi
+  logger "init" "info" "entry cwd=$PWD"
+  echo "Initialized .zcrew/ at $PWD"
+}
+
+cmd_register() {
+  CURRENT_SUBCMD="register"
+  require_project
+  ensure_registry_files
+
+  local name="${1:-}"
+  [[ -n "$name" ]] || { echo "Usage: zcrew register <name> [--paneId X] [--sessionId Y] [--agent A] [--cwd P] [--pid N] [--status S]" >&2; exit 1; }
+  shift || true
+
+  local pane_id="${ZELLIJ_PANE_ID:-}"
+  local session_id=""
+  local agent="claude"
+  local cwd="$PWD"
+  local pid="$$"
+  local status="alive"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --paneId) pane_id="${2:-}"; shift 2 ;;
+      --sessionId) session_id="${2:-}"; shift 2 ;;
+      --agent) agent="${2:-}"; shift 2 ;;
+      --cwd) cwd="${2:-}"; shift 2 ;;
+      --pid) pid="${2:-}"; shift 2 ;;
+      --status) status="${2:-}"; shift 2 ;;
+      *) echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+  done
+
+  local now
+  now=$(date +%s)
+
+  # If another non-matching key already points to this paneId, this is a
+  # duplicate-register attempt (typically from the SessionStart hook firing
+  # after a named spawn). No-op instead of clobbering the real name.
+  local existing
+  existing=$(jq -r --arg name "$name" --arg paneId "$pane_id" '
+    .panes // {}
+    | to_entries
+    | map(select((.value.paneId // "") == $paneId and .key != $name))
+    | .[0].key // empty
+  ' "$REGISTRY_FILE")
+  if [[ -n "$existing" ]]; then
+    logger "register" "info" "skip duplicate name=$name paneId=$pane_id existing=$existing"
+    echo "registered: $existing (existing for paneId=$pane_id)"
+    return 0
+  fi
+
+  registry_write_jq '
+    .version = 1
+    | .panes = (.panes // {})
+    | .panes[$name] = {
+        paneId: $paneId,
+        sessionId: (if $sessionId == "" then null else $sessionId end),
+        agent: $agent,
+        cwd: $cwd,
+        pid: (if $pid == "" then null else ($pid|tonumber) end),
+        lastSeen: ($now|tonumber),
+        status: $status
+      }
+  ' \
+    --arg name "$name" \
+    --arg paneId "$pane_id" \
+    --arg sessionId "$session_id" \
+    --arg agent "$agent" \
+    --arg cwd "$cwd" \
+    --arg pid "$pid" \
+    --arg now "$now" \
+    --arg status "$status"
+
+  echo "registered: $name"
+}
+
+cmd_spawn() {
+  CURRENT_SUBCMD="spawn"
+  local agent=""
+  local name=""
+  local model=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --model)
+        model="${2:-}"
+        [[ -n "$model" ]] || { echo "Usage: zcrew spawn [--model <model>] <agent> <name>" >&2; exit 1; }
+        shift 2
+        ;;
+      --*)
+        echo "zcrew: unknown option '$1'" >&2
+        exit 1
+        ;;
+      *)
+        if [[ -z "$agent" ]]; then
+          agent="$1"
+        elif [[ -z "$name" ]]; then
+          name="$1"
+        else
+          echo "Usage: zcrew spawn [--model <model>] <agent> <name>" >&2
+          exit 1
+        fi
+        shift
+        ;;
+    esac
+  done
+  [[ -n "$agent" && -n "$name" ]] || { echo "Usage: zcrew spawn [--model <model>] <agent> <name>" >&2; exit 1; }
+
+  # STEP 1: Minimal spawn — just open a new pane. No bx, no wrapper, no
+  # sentinel, no registry. Baby steps. Layers added back in subsequent steps.
+  logger "spawn" "info" "entry agent=$agent name=$name model=${model:-} cwd=$PWD ZELLIJ_SESSION_NAME=${ZELLIJ_SESSION_NAME:-} ZELLIJ_PANE_ID=${ZELLIJ_PANE_ID:-}"
+  require_zellij_session
+  require_project
+
+  local existing_pane
+  existing_pane=$(jq -r --arg n "$name" '.panes[$n].paneId // empty' "$REGISTRY_FILE")
+  if [[ -n "$existing_pane" ]]; then
+    echo "zcrew: pane '$name' already exists (pane=$existing_pane) — close it first with: zcrew close $name" >&2
+    exit 1
+  fi
+
+  if [[ ! -d "$BX_DIR" ]]; then
+    local missing=()
+    [[ -d "$BX_DIR" ]] || missing+=('.bx/')
+    echo "zcrew: missing ${missing[*]} in $PROJECT_DIR — run: zcrew install ." >&2
+    exit 1
+  fi
+  ensure_registry_files
+
+  logger "spawn" "info" "calling zellij action new-pane"
+
+  # STEP 4: built-ins use per-agent launchers; unknown agents fall back to a
+  # generic `bx run <agent>` command. The bash wrapper sets a trap so when the
+  # agent (and bx) exit, the registry entry is auto-removed.
+  local zcrew_abs="$PROJECT_DIR/bin/zcrew"
+  local trap_cmd="trap '\"$zcrew_abs\" unregister \"$name\"' EXIT"
+  local launch_cmd
+  if [[ -x "$PROJECT_DIR/lib/zcrew/launchers/$agent.sh" ]]; then
+    launch_cmd="$PROJECT_DIR/lib/zcrew/launchers/$agent.sh"
+  else
+    launch_cmd="bx run $(printf '%q' "$agent")"
+    if [[ -n "$model" ]]; then
+      launch_cmd+=" --model $(printf '%q' "$model")"
+      model=""
+    fi
+  fi
+  local model_prefix=""
+  if [[ -n "$model" ]]; then
+    model_prefix="export ZCREW_MODEL=$(printf '%q' "$model"); "
+  fi
+  local out
+  out=$(zellij action new-pane --cwd "$PROJECT_DIR" --name "$name" -- bash -c "$trap_cmd; ${model_prefix}$launch_cmd" 2>&1)
+  local rc=$?
+  logger "spawn" "info" "new-pane returned rc=$rc out='$out'"
+
+  if [[ $rc -ne 0 ]]; then
+    echo "zcrew: zellij action new-pane failed: $out" >&2
+    exit 1
+  fi
+
+  # STEP 2: parse pane ID from new-pane stdout (e.g. "terminal_5" → "5")
+  # and write a registry entry. Still no wrapper, no bx, no agent launch.
+  local pane_id="${out#terminal_}"
+  if [[ -z "$pane_id" || "$pane_id" == "$out" ]]; then
+    logger "spawn" "warn" "could not parse pane id from new-pane output: $out"
+    pane_id="?"
+  fi
+
+  local now
+  now=$(date +%s)
+  registry_write_jq '
+    .version = 1
+    | .panes = (.panes // {})
+    | .panes[$name] = {
+        paneId: $paneId,
+        sessionId: null,
+        agent: $agent,
+        cwd: $cwd,
+        pid: null,
+        lastSeen: ($now | tonumber),
+        status: "alive"
+      }
+  ' \
+    --arg name "$name" \
+    --arg paneId "$pane_id" \
+    --arg agent "$agent" \
+    --arg cwd "$PROJECT_DIR" \
+    --arg now "$now"
+
+  echo "spawned: $name ($agent) pane=$pane_id"
+}
+
+live_pane_ids() {
+  zellij action list-panes 2>/dev/null | sed -n 's/.*terminal_\([0-9][0-9]*\).*/\1/p'
+}
+
+cmd_unregister() {
+  CURRENT_SUBCMD="unregister"
+  require_project
+  local name="${1:-}"
+  [[ -n "$name" ]] || { echo "Usage: zcrew unregister <name>" >&2; exit 1; }
+  logger "unregister" "info" "entry name=$name"
+  registry_write_jq '
+    .panes |= del(.[$name])
+  ' --arg name "$name"
+}
+
+install_bootstrap() {
+  local target="$1"
+  if [[ ! -d "$target/.bx" ]]; then
+    (
+      cd "$target"
+      env -u BX_INSIDE ./bin/bx init >/dev/null
+    )
+    echo "    .bx/ (initialized via bx init)"
+  fi
+  if [[ ! -d "$target/.zcrew" ]]; then
+    (
+      cd "$target"
+      ./bin/zcrew init >/dev/null
+    )
+    echo "    .zcrew/ (initialized via zcrew init)"
+  fi
+  if [[ -d "$target/.bx" ]]; then
+    ensure_gitignore_lines "$target/.bx/.gitignore" \
+      "home/" \
+      ".provisioned"
+    echo "    .bx/.gitignore (ensured managed entries)"
+    if ensure_bx_managed_mounts "$target"; then
+      echo "    .bx/mounts (seeded managed rw mounts)"
+    fi
+  fi
+  if [[ -d "$target/.zcrew" ]]; then
+    ensure_team_conf_template "$target"
+    echo "    .zcrew/team.conf (seeded if missing)"
+    ensure_gitignore_lines "$target/.zcrew/.gitignore" \
+      "registry.json" \
+      "registry.lock" \
+      "audit.log" \
+      "spawn/"
+    echo "    .zcrew/.gitignore (ensured managed entries)"
+  fi
+}
+
+# Install zcrew into a target project directory.
+# Copies bin/, skills, launchers, and managed install config — idempotent.
+# Initializes .bx/ in the target if missing.
+cmd_install() {
+  CURRENT_SUBCMD="install"
+  local target="${1:-}"
+  [[ -n "$target" ]] || { echo "Usage: zcrew install <target-project-dir>" >&2; exit 1; }
+  [[ -d "$target" ]] || { echo "zcrew: target dir does not exist: $target" >&2; exit 1; }
+  local target_abs
+  target_abs=$(realpath "$target")
+
+  # Resolve our own source location: bin/zcrew → repo root
+  local self src
+  self=$(readlink -f "${BASH_SOURCE[0]}")
+  src=$(dirname "$(dirname "$self")")
+  [[ -f "$src/bin/zcrew" ]] || { echo "zcrew: source repo not found at $src" >&2; exit 1; }
+  [[ -d "$src/.agents/skills/zcrew" ]] || { echo "zcrew: source skill dir missing at $src/.agents/skills/zcrew" >&2; exit 1; }
+  [[ -d "$src/.claude/skills" ]] || { echo "zcrew: source skills dir missing at $src/.claude/skills" >&2; exit 1; }
+  [[ -d "$src/.pi/skills" ]] || { echo "zcrew: source skills dir missing at $src/.pi/skills" >&2; exit 1; }
+  [[ -d "$src/.codex/skills/zcrew" ]] || { echo "zcrew: source skill dir missing at $src/.codex/skills/zcrew" >&2; exit 1; }
+  [[ -f "$src/AGENTS.md" ]] || { echo "zcrew: source AGENTS.md missing at $src/AGENTS.md" >&2; exit 1; }
+
+  local src_abs
+  src_abs=$(realpath "$src")
+  if [[ "$src_abs" == "$target_abs" ]]; then
+    echo "==> source == target ($target_abs); skipping materialization, running bootstrap only"
+    install_bootstrap "$target"
+    return 0
+  fi
+
+  echo "==> installing zcrew from $src into $target"
+
+  # bin tools
+  mkdir -p "$target/bin"
+  cp "$src/bin/zcrew" "$target/bin/zcrew"
+  chmod +x "$target/bin/zcrew"
+  echo "    bin/zcrew"
+  cp "$src/bin/bx" "$target/bin/bx"
+  chmod +x "$target/bin/bx"
+  echo "    bin/bx"
+  cp "$src/bin/ix" "$target/bin/ix"
+  chmod +x "$target/bin/ix"
+  echo "    bin/ix"
+
+  # Canonical cross-tool skill first so copied symlinks resolve in-target.
+  mkdir -p "$target/.agents/skills"
+  rm -rf "$target/.agents/skills/zcrew"
+  cp -r "$src/.agents/skills/zcrew" "$target/.agents/skills/"
+  echo "    .agents/skills/zcrew"
+
+  # Skills (overwrite — these are zcrew's own)
+  mkdir -p "$target/.claude/skills"
+  for skill in zspawn zsend zpanes zsync zname zclose zcrew; do
+    rm -rf "$target/.claude/skills/$skill"
+    cp -r "$src/.claude/skills/$skill" "$target/.claude/skills/"
+    echo "    .claude/skills/$skill"
+  done
+  mkdir -p "$target/.pi/skills"
+  for skill in zspawn zsend zpanes zsync zname zclose zcrew; do
+    rm -rf "$target/.pi/skills/$skill"
+    cp -r "$src/.pi/skills/$skill" "$target/.pi/skills/"
+    echo "    .pi/skills/$skill"
+  done
+  mkdir -p "$target/.codex/skills"
+  rm -rf "$target/.codex/skills/zcrew"
+  cp -r "$src/.codex/skills/zcrew" "$target/.codex/skills/"
+  echo "    .codex/skills/zcrew"
+
+  if [[ -f "$target/AGENTS.md" ]]; then
+    echo "    AGENTS.md / CLAUDE.md (skipped: target already has AGENTS.md)"
+  elif [[ -e "$target/CLAUDE.md" ]]; then
+    cp "$src/AGENTS.md" "$target/AGENTS.md"
+    echo "    AGENTS.md"
+    echo "    CLAUDE.md (skipped: target already has CLAUDE.md)"
+  else
+    cp "$src/AGENTS.md" "$target/AGENTS.md"
+    echo "    AGENTS.md"
+    ln -s AGENTS.md "$target/CLAUDE.md"
+    echo "    CLAUDE.md -> AGENTS.md"
+  fi
+
+  local settings_before settings_after
+  settings_before=""
+  if [[ -f "$target/.claude/settings.json" ]]; then
+    settings_before=$(cat "$target/.claude/settings.json")
+  fi
+  if remove_zcrew_sessionstart_hook "$target"; then
+    if jq -e 'type == "object" and length == 0' "$target/.claude/settings.json" >/dev/null 2>&1; then
+      rm -f "$target/.claude/settings.json"
+      settings_after=""
+    else
+      settings_after=$(cat "$target/.claude/settings.json")
+    fi
+  else
+    settings_after="$settings_before"
+  fi
+  if [[ "$settings_before" != "$settings_after" ]]; then
+    echo "    .claude/settings.json (removed retired SessionStart hook)"
+  fi
+  rm -f "$target/.claude/hooks/zcrew-register.sh"
+  rmdir --ignore-fail-on-non-empty "$target/.claude/hooks" 2>/dev/null || true
+
+  # Launchers
+  mkdir -p "$target/lib/zcrew/launchers"
+  cp "$src/lib/zcrew/tell" "$target/lib/zcrew/tell"
+  chmod +x "$target/lib/zcrew/tell"
+  echo "    lib/zcrew/tell"
+  for l in claude codex pi; do
+    cp "$src/lib/zcrew/launchers/$l.sh" "$target/lib/zcrew/launchers/$l.sh"
+    chmod +x "$target/lib/zcrew/launchers/$l.sh"
+    echo "    lib/zcrew/launchers/$l.sh"
+  done
+
+  write_managed_mise_floor "$target"
+  echo "    .config/mise.toml (zcrew managed floor)"
+
+  install_bootstrap "$target"
+
+  echo ""
+  echo "==> zcrew installed in $target_abs"
+  echo ""
+  echo "Next steps:"
+  echo "  1. cd $target_abs"
+  echo "  2. Restart claude in this dir to load the new skills."
+}
+
+cmd_rename() {
+  CURRENT_SUBCMD="rename"
+  require_project
+  local old="${1:-}"
+  local new="${2:-}"
+  [[ -n "$old" && -n "$new" ]] || { echo "Usage: zcrew rename <old> <new>" >&2; exit 1; }
+  logger "rename" "info" "entry old=$old new=$new"
+  local pane_id
+  pane_id=$(jq -r --arg old "$old" '(.panes // {}) | .[$old].paneId // empty' "$REGISTRY_FILE")
+  registry_write_jq '
+    .version = 1
+    | .panes = (.panes // {})
+    | if (.panes[$old] == null) then
+        error("zcrew: name '\''" + $old + "'\'' does not exist")
+      elif (.panes[$new] != null) then
+        error("zcrew: name '\''" + $new + "'\'' already exists")
+      else
+        (.panes[$old].paneId // "") as $paneId
+        | .panes[$new] = .panes[$old]
+        | .panes |= del(.[$old])
+        | .panes |= del(.["pane-" + $paneId])
+      end
+  ' \
+    --arg old "$old" \
+    --arg new "$new"
+  # Also rename the zellij pane title so the tab label reflects the new name.
+  if [[ -n "$pane_id" ]] && command -v zellij >/dev/null 2>&1; then
+    zellij action rename-pane -p "$pane_id" "$new" 2>/dev/null || true
+  fi
+  echo "renamed: $old -> $new"
+}
+
+resolve_sender_name() {
+  require_project
+  ensure_registry_files
+
+  local pane_id="${ZELLIJ_PANE_ID:-}"
+  [[ -n "$pane_id" ]] || pane_id="0"
+
+  local sender_name
+  sender_name=$(jq -r --arg paneId "$pane_id" '
+    (.panes // {})
+    | to_entries
+    | map(select((.value.paneId // "") == $paneId))
+    | sort_by(if (.key | test("^pane-[0-9]+$")) then 1 else 0 end)
+    | .[0].key // empty
+  ' "$REGISTRY_FILE")
+  if [[ -n "$sender_name" ]]; then
+    printf '%s\n' "$sender_name"
+    return 0
+  fi
+
+  local now
+  now=$(date +%s)
+  registry_write_jq '
+    .version = 1
+    | .panes = (.panes // {})
+    | if (.panes | to_entries | any((.value.paneId // "") == $paneId)) then
+        .
+      else
+        .panes[(if (.panes.main == null) then "main" else ("pane-" + $paneId) end)] = {
+          paneId: $paneId,
+          sessionId: null,
+          agent: "unknown",
+          cwd: $cwd,
+          pid: ($pid | tonumber),
+          lastSeen: ($now | tonumber),
+          status: "alive"
+        }
+      end
+  ' \
+    --arg paneId "$pane_id" \
+    --arg cwd "$PWD" \
+    --arg pid "$$" \
+    --arg now "$now"
+
+  sender_name=$(jq -r --arg paneId "$pane_id" '
+    (.panes // {})
+    | to_entries
+    | map(select((.value.paneId // "") == $paneId))
+    | sort_by(if (.key | test("^pane-[0-9]+$")) then 1 else 0 end)
+    | .[0].key // empty
+  ' "$REGISTRY_FILE")
+  [[ -n "$sender_name" ]] || {
+    echo "zcrew: failed to resolve sender name for paneId=$pane_id" >&2
+    exit 1
+  }
+  printf '%s\n' "$sender_name"
+}
+
+lookup_registered_pane_id() {
+  local name="${1:-}"
+  jq -r --arg name "$name" '.panes[$name].paneId // empty' "$REGISTRY_FILE"
+}
+
+lookup_registered_agent() {
+  local name="${1:-}"
+  jq -r --arg name "$name" '.panes[$name].agent // empty' "$REGISTRY_FILE"
+}
+
+lookup_registered_cwd() {
+  local name="${1:-}"
+  jq -r --arg name "$name" '.panes[$name].cwd // empty' "$REGISTRY_FILE"
+}
+
+refresh_claude_auth_for_target() {
+  local target_cwd="${1:-}"
+  local target_agent="${2:-}"
+  [[ "$target_agent" == "claude" ]] || return 0
+  [[ -n "$target_cwd" ]] || return 0
+
+  local dst_home="$target_cwd/.bx/home"
+  [[ -d "$dst_home" ]] || return 0
+
+  local host_home="${HOME:-}"
+  if [[ -z "$host_home" ]]; then
+    host_home="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)"
+  fi
+  [[ -n "$host_home" ]] || return 0
+
+  local src_json="$host_home/.claude.json"
+  local src_creds="$host_home/.claude/.credentials.json"
+  [[ -f "$src_json" ]] || { logger "send" "warn" "no host .claude.json to sync"; return 0; }
+  [[ -f "$src_creds" ]] || { logger "send" "warn" "no host .credentials.json to sync"; return 0; }
+
+  local tmp_json="$dst_home/.claude.json.tmp.$$"
+  if ! cp "$src_json" "$tmp_json" 2>/dev/null; then
+    rm -f "$tmp_json"
+    logger "send" "warn" "copy .claude.json failed"
+    return 0
+  fi
+  if ! chmod 600 "$tmp_json" 2>/dev/null; then
+    rm -f "$tmp_json"
+    logger "send" "warn" "chmod .claude.json failed"
+    return 0
+  fi
+  if ! mv "$tmp_json" "$dst_home/.claude.json" 2>/dev/null; then
+    rm -f "$tmp_json"
+    logger "send" "warn" "move .claude.json failed"
+    return 0
+  fi
+
+  mkdir -p "$dst_home/.claude" 2>/dev/null || {
+    logger "send" "warn" "mkdir .claude failed"
+    return 0
+  }
+  local tmp_creds="$dst_home/.claude/.credentials.json.tmp.$$"
+  if ! cp "$src_creds" "$tmp_creds" 2>/dev/null; then
+    rm -f "$tmp_creds"
+    logger "send" "warn" "copy .credentials.json failed"
+    return 0
+  fi
+  if ! chmod 600 "$tmp_creds" 2>/dev/null; then
+    rm -f "$tmp_creds"
+    logger "send" "warn" "chmod .credentials.json failed"
+    return 0
+  fi
+  if ! mv "$tmp_creds" "$dst_home/.claude/.credentials.json" 2>/dev/null; then
+    rm -f "$tmp_creds"
+    logger "send" "warn" "move .credentials.json failed"
+    return 0
+  fi
+
+  logger "send" "info" "refreshed claude auth in $dst_home"
+}
+
+live_registered_panes() {
+  local live_json
+  live_json=$(live_pane_ids | jq -Rsc 'split("\n") | map(select(length>0))')
+  jq -r --argjson live "$live_json" '
+    (.panes // {})
+    | to_entries
+    | map(select((.value.paneId // "") as $id | ($live | index($id)) != null))
+    | sort_by(.value.paneId, if (.key | test("^pane-[0-9]+$")) then 1 else 0 end, .key)
+    | group_by(.value.paneId)
+    | map(.[0] | "\(.key)\t\(.value.agent // "unknown")\t\(.value.paneId // "")")
+    | .[]
+  ' "$REGISTRY_FILE"
+}
+
+print_stale_send_error() {
+  local name="$1"
+  local stale_pane_id="$2"
+  local stale_agent="${3:-claude}"
+
+  echo "zcrew: pane '$name' is gone (paneId=$stale_pane_id not live)." >&2
+
+  local live_lines
+  live_lines=$(live_registered_panes)
+  if [[ -z "$live_lines" ]]; then
+    echo "Live panes: (none)" >&2
+    echo "  zcrew spawn $stale_agent $name     # start fresh" >&2
+    return
+  fi
+
+  echo "Live panes:" >&2
+  local line live_name live_agent live_pane_id
+  while IFS=$'\t' read -r live_name live_agent live_pane_id; do
+    [[ -n "$live_name" ]] || continue
+    echo "  $live_name ($live_agent)" >&2
+  done <<< "$live_lines"
+  while IFS=$'\t' read -r live_name live_agent live_pane_id; do
+    [[ -n "$live_name" ]] || continue
+    echo "  zcrew rename $live_name $name   # reassign existing live pane" >&2
+  done <<< "$live_lines"
+  echo "  zcrew spawn $stale_agent $name     # start fresh" >&2
+}
+
+cmd_close() {
+  CURRENT_SUBCMD="close"
+  require_project
+  local name="${1:-}"
+  [[ -n "$name" ]] || { echo "Usage: zcrew close <name>" >&2; exit 1; }
+  logger "close" "info" "entry name=$name"
+
+  local force=false
+  if [[ "$name" == "--force" || "$name" == "--self" ]]; then
+    force=true
+    name="${1:-}"
+    shift || true
+    [[ -n "$name" ]] || { echo "Usage: zcrew close [--force] <name>" >&2; exit 1; }
+  fi
+
+  local pane_id
+  pane_id=$(lookup_registered_pane_id "$name")
+  if [[ -z "$pane_id" ]]; then
+    logger "close" "error" "unknown name=$name"
+    echo "zcrew: unknown pane name '$name'" >&2
+    exit 1
+  fi
+
+  if [[ "$force" != "true" && -n "${ZELLIJ_PANE_ID:-}" && "$pane_id" == "$ZELLIJ_PANE_ID" ]]; then
+    echo "zcrew: refusing to close yourself ($name, pane=$pane_id) — use: zcrew close --force $name" >&2
+    exit 1
+  fi
+
+  local close_err=""
+  if ! close_err=$(zellij action close-pane -p "$pane_id" 2>&1); then
+    logger "close" "warn" "close-pane failed name=$name paneId=$pane_id err='$close_err'"
+    [[ -n "$close_err" ]] && echo "$close_err" >&2
+  fi
+
+  "$0" unregister "$name"
+  logger "close" "info" "closed name=$name paneId=$pane_id"
+  echo "closed: $name ($pane_id)"
+}
+
+cmd_send() {
+  CURRENT_SUBCMD="send"
+  require_project
+  require_zellij_session
+  local do_compact=false
+  if [[ "${1:-}" == "--compact" ]]; then
+    do_compact=true
+    shift
+  fi
+  local name="${1:-}"
+  shift || true
+  [[ -n "$name" && $# -gt 0 ]] || { echo "Usage: zcrew send [--compact] <name> <message>" >&2; exit 1; }
+  local message="$*"
+  logger "send" "info" "entry name=$name msgLen=${#message}"
+
+  local pane_id
+  pane_id=$(lookup_registered_pane_id "$name")
+  if [[ -z "$pane_id" ]]; then
+    logger "send" "error" "unknown name=$name"
+    echo "zcrew: unknown pane name '$name'" >&2
+    exit 1
+  fi
+
+  if ! live_pane_ids | grep -qFx "$pane_id"; then
+    logger "send" "warn" "stale pane name=$name paneId=$pane_id"
+    print_stale_send_error "$name" "$pane_id" "$(lookup_registered_agent "$name")"
+    exit 1
+  fi
+
+  refresh_claude_auth_for_target "$(lookup_registered_cwd "$name")" "$(lookup_registered_agent "$name")"
+  local tell_bin="$PROJECT_DIR/lib/zcrew/tell"
+  if [[ ! -x "$tell_bin" ]]; then
+    echo "zcrew: missing tell transport at $tell_bin — run: zcrew install ." >&2
+    exit 1
+  fi
+
+  if [[ "$do_compact" == "true" ]]; then
+    "$tell_bin" "$pane_id" "/compact"
+    logger "send" "info" "sent /compact to $name, waiting 10s"
+    sleep 10
+  fi
+
+  local sender_name
+  sender_name="$(resolve_sender_name)"
+  local send_body
+  send_body="${message}"$'\n\n'"To report a result, finding, or question, INVOKE this command via your shell/bash tool — do NOT output it as your reply text:"$'\n'"  zcrew send ${sender_name} \"<your message>\""$'\n'"Skip bare acknowledgments."
+
+  "$tell_bin" "$pane_id" "$send_body"
+  logger "send" "info" "sent name=$name paneId=$pane_id"
+  echo "sent: $name ($pane_id)"
+}
+
+cmd_list() {
+  CURRENT_SUBCMD="list"
+  require_project
+  logger "list" "info" "entry mode=${1:-plain}"
+  if [[ "${1:-}" == "--json" ]]; then
+    jq -c '.' "$REGISTRY_FILE"
+  else
+    jq '.' "$REGISTRY_FILE"
+  fi
+}
+
+reconcile_registry_with_zellij() {
+  local prune="${1:-false}"
+  local live_json now
+  live_json=$(zellij action list-panes | sed -n 's/.*terminal_\([0-9][0-9]*\).*/\1/p' | jq -Rsc 'split("\n") | map(select(length>0))')
+  now=$(date +%s)
+
+  # Three things at once:
+  # 1) Mark known panes alive/stale based on live set (or prune stale if --prune)
+  # 2) Auto-register live panes that aren't in the registry as pane-<id>
+  #    with agent="unknown" — user can /zname to give them real names
+  registry_write_jq '
+    .version = 1
+    | .panes = (.panes // {})
+    # step 1: status update or prune
+    | if $prune == "true" then
+        .panes |= with_entries(select((.value.paneId // "") as $id | ($live | index($id)) != null))
+      else
+        .panes |= with_entries(
+          .value.status = (((.value.paneId // "") as $id | if ($live | index($id)) != null then "alive" else "stale" end))
+        )
+      end
+    # step 2: register unknown live panes as pane-<id> placeholders
+    | . as $root
+    | .panes += (
+        $live
+        | map(. as $id | select(
+            ($root.panes | to_entries | map(.value.paneId == $id) | any) | not
+          ))
+        | map({
+            ("pane-" + .): {
+              paneId: .,
+              sessionId: null,
+              agent: "unknown",
+              cwd: null,
+              pid: null,
+              lastSeen: ($now | tonumber),
+              status: "alive"
+            }
+          })
+        | add // {}
+      )
+  ' \
+    --argjson live "$live_json" \
+    --arg prune "$prune" \
+    --arg now "$now"
+}
+
+cmd_sync() {
+  CURRENT_SUBCMD="sync"
+  ZCREW_AUTO_SYNC=0
+  require_project
+  local prune="true"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --keep-stale) prune="false" ;;
+      --prune) prune="true" ;;
+      *) echo "Usage: zcrew sync [--keep-stale|--prune]" >&2; exit 1 ;;
+    esac
+    shift
+  done
+  logger "sync" "info" "entry prune=$prune"
+
+  reconcile_registry_with_zellij "$prune"
+
+  logger "sync" "info" "done prune=$prune"
+  echo "synced"
+}
+
+dispatch_registry_command() {
+  local fn="$1"
+  shift
+
+  ZCREW_PROJECT_READY=0
+
+  "$fn" "$@"
+}
+
+main() {
+  local cmd="${1:-}"
+  shift || true
+
+  case "$cmd" in
+    init) cmd_init "$@" ;;
+    install) cmd_install "$@" ;;
+    register) dispatch_registry_command cmd_register "$@" ;;
+    unregister) dispatch_registry_command cmd_unregister "$@" ;;
+    rename) dispatch_registry_command cmd_rename "$@" ;;
+    close) dispatch_registry_command cmd_close "$@" ;;
+    spawn) dispatch_registry_command cmd_spawn "$@" ;;
+    send) dispatch_registry_command cmd_send "$@" ;;
+    list) dispatch_registry_command cmd_list "$@" ;;
+    sync) cmd_sync "$@" ;;
+    *)
+      cat <<USAGE
+Usage: zcrew <command>
+
+Commands:
+  init
+  install <target-project-dir>
+  spawn [--model <model>] <agent> <name>
+  rename <old> <new>
+  close <name>
+  send <name> <message>
+  list [--json]
+  sync [--keep-stale|--prune]
+  register <name> [--paneId X] [--sessionId Y] [--agent A] [--cwd P] [--pid N] [--status S]
+USAGE
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"
