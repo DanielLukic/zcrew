@@ -6,6 +6,9 @@
 .linear.conf
 .nca
 
+# Temp fix if zellij not resolved in sandbox
+bin/zellij
+
 # Local dev notes
 CLAUDE.local.md
 AGENTS.local.md
