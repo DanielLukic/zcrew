@@ -2,6 +2,10 @@
 
 **zcrew** is a quick-win multi-agent CLI: clone, install, and run Claude, Codex, or Pi agents in [zellij](https://zellij.dev) panes, each sandboxed via [bwrap](https://github.com/containers/bubblewrap). A low-ceremony orchestrator for micro-managers like me who want to watch all their little agents at work.
 
+The default sandbox model is intentionally minimal. zcrew does **not** mount or copy your full host `~/.claude`, `~/.codex`, `~/.pi`, or `~/.local` trees into agent panes. Instead, each project gets a clean sandbox-local HOME under `.bx/home/`, a narrow runtime mount allowlist, copied auth artifacts, and tiny generated config files.
+
+That means your normal Claude/Codex auth keeps working seamlessly inside the sandbox — including subscription-backed logins — without dragging in your full personal agent state, MCP setup, extensions, caches, or history from the host. Sessions and runtime state still persist, but only inside the project sandbox.
+
 ## What it does
 
 - **Spawn** named agent panes: `zcrew spawn claude claudio`, `zcrew spawn codex sam`, `zcrew spawn pi piper`
