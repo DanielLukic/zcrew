@@ -404,6 +404,7 @@ cmd_spawn() {
     echo "zcrew: missing ${missing[*]} in $PROJECT_DIR — run: zcrew install ." >&2
     exit 1
   fi
+  ensure_bx_managed_mounts "$PROJECT_DIR" >/dev/null 2>&1 || true
   ensure_registry_files
 
   logger "spawn" "info" "calling zellij action new-pane"

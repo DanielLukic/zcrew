@@ -602,6 +602,64 @@ test_11e_spawn_builtin_agent_uses_launcher_script() {
   jq -e '.panes.reviewer.agent == "codex" and .panes.reviewer.paneId == "556"' "$d/.zcrew/registry.json" >/dev/null
 }
 
+test_11f_spawn_seeds_missing_managed_mounts() {
+  local d mockbin args_file out zellij_sock
+  d="$(new_test_dir 11f)"
+  mockbin="$d/mock-bin"
+  args_file="$d/zellij-args.txt"
+  zellij_sock="/run/user/$(id -u)/zellij"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  rm -f "$d/.bx/mounts"
+  mkdir -p "$d/.bx" "$d/lib/zcrew/launchers"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$d/lib/zcrew/launchers/claude.sh"
+  chmod +x "$d/lib/zcrew/launchers/claude.sh"
+  make_mock_zellij_spawn "$mockbin" "$args_file"
+
+  out="$(
+    cd "$d" || exit 1
+    PATH="$mockbin:$PATH" MOCK_ZELLIJ_ARGS_FILE="$args_file" \
+      MOCK_ZELLIJ_LIST_OUTPUT='' MOCK_ZELLIJ_NEW_PANE_OUTPUT='terminal_557' \
+      ZELLIJ_SESSION_NAME='test-session' "$ZCREW_BIN" spawn claude healer 2>&1
+  )" || return 1
+
+  printf '%s\n' "$out" | grep -Fq 'spawned: healer (claude) pane=557' || return 1
+  [[ -f "$d/.bx/mounts" ]] || return 1
+  grep -Fqx "$zellij_sock $zellij_sock rw" "$d/.bx/mounts"
+}
+
+test_11g_spawn_repairs_managed_mounts_preserving_custom_lines() {
+  local d mockbin args_file out zellij_sock custom_src custom_dst
+  d="$(new_test_dir 11g)"
+  mockbin="$d/mock-bin"
+  args_file="$d/zellij-args.txt"
+  zellij_sock="/run/user/$(id -u)/zellij"
+  custom_src="$d/custom-src"
+  custom_dst="/opt/custom"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  mkdir -p "$d/.bx" "$d/lib/zcrew/launchers" "$custom_src"
+  cat > "$d/.bx/mounts" <<EOF
+$custom_src $custom_dst ro
+/old/zellij /run/user/$(id -u)/zellij rw
+EOF
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$d/lib/zcrew/launchers/claude.sh"
+  chmod +x "$d/lib/zcrew/launchers/claude.sh"
+  make_mock_zellij_spawn "$mockbin" "$args_file"
+
+  out="$(
+    cd "$d" || exit 1
+    PATH="$mockbin:$PATH" MOCK_ZELLIJ_ARGS_FILE="$args_file" \
+      MOCK_ZELLIJ_LIST_OUTPUT='' MOCK_ZELLIJ_NEW_PANE_OUTPUT='terminal_558' \
+      ZELLIJ_SESSION_NAME='test-session' "$ZCREW_BIN" spawn claude healer2 2>&1
+  )" || return 1
+
+  printf '%s\n' "$out" | grep -Fq 'spawned: healer2 (claude) pane=558' || return 1
+  grep -Fqx "$custom_src $custom_dst ro" "$d/.bx/mounts" || return 1
+  grep -Fqx "$zellij_sock $zellij_sock rw" "$d/.bx/mounts" || return 1
+  [[ "$(grep -Fxc "$zellij_sock $zellij_sock rw" "$d/.bx/mounts")" -eq 1 ]]
+}
+
 test_12_send_outside_project_fails_hard() {
   local d out
   d="$(new_test_dir 12)"
@@ -1555,6 +1613,8 @@ main() {
   run_test "11c) spawn reuses a name after auto-pruning a stale entry" test_11c_spawn_allows_name_after_pruning_stale_entry
   run_test "11d) spawn fresh name succeeds" test_11d_spawn_fresh_name_succeeds
   run_test "11e) spawn built-in agent uses launcher script" test_11e_spawn_builtin_agent_uses_launcher_script
+  run_test "11f) spawn seeds missing managed bx mounts" test_11f_spawn_seeds_missing_managed_mounts
+  run_test "11g) spawn repairs managed mounts preserving custom lines" test_11g_spawn_repairs_managed_mounts_preserving_custom_lines
   run_test "12) send outside project fails hard" test_12_send_outside_project_fails_hard
   run_test "12b) stale send suggestion preserves unknown agent name" test_12b_send_stale_unknown_agent_preserves_agent_name_in_suggestion
   run_test "13) rename foo->bar preserves fields and removes old key" test_13_rename_happy_path_preserves_fields
