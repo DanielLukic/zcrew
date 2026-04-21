@@ -352,7 +352,6 @@ EOF
 
     ensure_mounts_file_seeded
 
-    trust_mise_config_in_sandbox_if_possible
     write_bashrc_template
 
     cat > "$HOME_DIR/.bash_profile" <<'BASH_PROFILE'
