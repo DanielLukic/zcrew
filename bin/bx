@@ -104,6 +104,7 @@ ensure_runtime_mountpoints() {
         "$HOME_DIR/.local/share" \
         "$HOME_DIR/.local/share/claude" \
         "$HOME_DIR/.local/share/mise" \
+        "$HOME_DIR/.local/state/mise" \
         "$HOME_DIR/.config/mise"
 }
 
@@ -125,6 +126,14 @@ run_provision_if_needed() {
         PROJECT_DIR="$PROJECT_DIR" CONFIG_DIR="$CONFIG_DIR" HOME_DIR="$HOME_DIR" bash "$PROVISION_SCRIPT"
     )
     date -Is > "$PROVISION_STAMP"
+}
+
+trust_mise_config_in_sandbox_if_possible() {
+    local project_mise_config="$PROJECT_DIR/.config/mise.toml"
+    [[ -f "$project_mise_config" ]] || return 0
+    command -v mise >/dev/null 2>&1 || return 0
+    mkdir -p "$HOME_DIR/.local/state/mise"
+    HOME="$HOME_DIR" mise trust -y "$project_mise_config" >/dev/null 2>&1 || true
 }
 
 write_bashrc_template() {
@@ -343,6 +352,7 @@ EOF
 
     ensure_mounts_file_seeded
 
+    trust_mise_config_in_sandbox_if_possible
     write_bashrc_template
 
     cat > "$HOME_DIR/.bash_profile" <<'BASH_PROFILE'
@@ -401,6 +411,7 @@ run_bwrap() {
     seed_pi_sandbox_state
 
     ensure_runtime_mountpoints
+    trust_mise_config_in_sandbox_if_possible
 
     local args=(
         --unshare-user --uid "$(id -u)" --gid "$(id -g)"
