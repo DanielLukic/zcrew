@@ -97,6 +97,16 @@ seed_pi_sandbox_state() {
     printf '{"mcpServers":{}}\n' > "$HOME_DIR/.pi/agent/mcp.json"
 }
 
+ensure_runtime_mountpoints() {
+    mkdir -p \
+        "$HOME_DIR/.local/bin" \
+        "$HOME_DIR/.local/lib/node_modules" \
+        "$HOME_DIR/.local/share" \
+        "$HOME_DIR/.local/share/claude" \
+        "$HOME_DIR/.local/share/mise" \
+        "$HOME_DIR/.config/mise"
+}
+
 load_config() {
     if [[ ! -f "$CONFIG_FILE" ]]; then
         echo "No .bx/config found. Run 'bx init' first." >&2
@@ -320,6 +330,7 @@ cmd_init() {
         "$HOME_DIR/.pi/agent" \
         "$HOME_DIR/.config/mise" \
         "$HOME_DIR/.ssh"
+    ensure_runtime_mountpoints
 
     cat > "$CONFIG_FILE" <<EOF
 WORKDIR=$workdir
@@ -389,6 +400,8 @@ run_bwrap() {
 
     seed_pi_sandbox_state
 
+    ensure_runtime_mountpoints
+
     local args=(
         --unshare-user --uid "$(id -u)" --gid "$(id -g)"
         --unshare-pid
@@ -431,14 +444,17 @@ run_bwrap() {
     # Project home dir (persistent RW — survives between sessions)
     args+=(--bind "$HOME_DIR" "$SANDBOX_HOME")
 
-    # ~/.local — tools, libs, claude binary store (RO base)
-    # mise share+state overridden as RW: share has installs, state has tracked/trusted configs
-    [[ -d "$HOME/.local" ]] && \
-        args+=(--ro-bind "$HOME/.local" "$SANDBOX_HOME/.local")
+    # ~/.local — narrow runtime allowlist only
+    [[ -d "$HOME/.local/bin" ]] && \
+        args+=(--ro-bind "$HOME/.local/bin" "$SANDBOX_HOME/.local/bin")
+    [[ -d "$HOME/.local/share/claude" ]] && \
+        args+=(--ro-bind "$HOME/.local/share/claude" "$SANDBOX_HOME/.local/share/claude")
     [[ -d "$HOME/.local/share/mise" ]] && \
-        args+=(--bind "$HOME/.local/share/mise" "$SANDBOX_HOME/.local/share/mise")
-    mkdir -p "$HOME/.local/state/mise"
-    args+=(--bind "$HOME/.local/state/mise" "$SANDBOX_HOME/.local/state/mise")
+        args+=(--ro-bind "$HOME/.local/share/mise" "$SANDBOX_HOME/.local/share/mise")
+    [[ -d "$HOME/.local/lib/node_modules/@openai/codex" ]] && \
+        args+=(--ro-bind "$HOME/.local/lib/node_modules/@openai/codex" "$SANDBOX_HOME/.local/lib/node_modules/@openai/codex")
+    [[ -d "$HOME/.local/lib/node_modules/@mariozechner/pi-coding-agent" ]] && \
+        args+=(--ro-bind "$HOME/.local/lib/node_modules/@mariozechner/pi-coding-agent" "$SANDBOX_HOME/.local/lib/node_modules/@mariozechner/pi-coding-agent")
 
     # Config files (RO)
     [[ -f "$HOME/.gitconfig" ]] && \
