@@ -26,7 +26,7 @@ prepare_host_home() {
     printf 'model = "dummy"\n' > "$HOST_HOME/.codex/config.toml"
     printf '{"providers":{"openai-codex":{"token":"dummy"}}}\n' > "$HOST_HOME/.pi/agent/auth.json"
     printf '{"mcpServers":{"host":{}}}\n' > "$HOST_HOME/.pi/agent/mcp.json"
-    printf '{"defaultProvider":"host"}\n' > "$HOST_HOME/.pi/agent/settings.json"
+    printf '{"defaultProvider":"host","defaultModel":"host-model"}\n' > "$HOST_HOME/.pi/agent/settings.json"
     printf '{"providers":{"custom":{}}}\n' > "$HOST_HOME/.pi/agent/models.json"
     if [[ ! -d "$HOME/.local" ]]; then
         echo "skip: $HOME/.local not present"
@@ -243,18 +243,51 @@ test_8_codex_run_generates_trust_config_and_refreshes_auth() {
     grep -Fq '"fresh-host-token"' "$sandbox_auth"
 }
 
-test_8c_pi_run_copies_auth_and_stubs_mcp() {
-    local p
+test_8c_pi_run_syncs_auth_models_and_targeted_settings() {
+    local p sandbox_settings sandbox_models sandbox_mcp sandbox_auth
     p="$(new_project_dir test8c)"
+    sandbox_settings="$p/.bx/home/.pi/agent/settings.json"
+    sandbox_models="$p/.bx/home/.pi/agent/models.json"
+    sandbox_mcp="$p/.bx/home/.pi/agent/mcp.json"
+    sandbox_auth="$p/.bx/home/.pi/agent/auth.json"
+
+    bx_cmd "$p" init >/dev/null 2>&1 || return 1
+    mkdir -p "$p/.bx/home/.pi/agent"
+    printf '%s\n' '{"keepLocal":true,"defaultProvider":"old","defaultModel":"old-model"}' > "$sandbox_settings"
+    bx_cmd "$p" run true >/dev/null 2>&1 || true
+
+    [[ -f "$sandbox_auth" ]] || return 1
+    [[ -f "$sandbox_mcp" ]] || return 1
+    jq -e '.mcpServers == {}' "$sandbox_mcp" >/dev/null || return 1
+    [[ -f "$sandbox_settings" ]] || return 1
+    jq -e '.keepLocal == true and .defaultProvider == "host" and .defaultModel == "host-model"' "$sandbox_settings" >/dev/null || return 1
+    jq -e 'has("packages") | not' "$sandbox_settings" >/dev/null || return 1
+    [[ -f "$sandbox_models" ]] || return 1
+    cmp -s "$HOST_HOME/.pi/agent/models.json" "$sandbox_models" || return 1
+}
+
+test_8d_pi_run_syncs_model_keys_and_refreshes_models_json() {
+    local p sandbox_settings sandbox_models
+    p="$(new_project_dir test8d)"
+    sandbox_settings="$p/.bx/home/.pi/agent/settings.json"
+    sandbox_models="$p/.bx/home/.pi/agent/models.json"
+
+    printf '%s\n' '{"defaultProvider":"openai-codex","defaultModel":"gpt-5.3-codex","defaultThinkingLevel":"medium","enabledModels":["gpt-*"],"packages":["leak"]}' > "$HOST_HOME/.pi/agent/settings.json"
+    printf '%s\n' '{"providers":{"fresh":{"models":[{"id":"x"}]}}}' > "$HOST_HOME/.pi/agent/models.json"
 
     bx_cmd "$p" init >/dev/null 2>&1 || return 1
     bx_cmd "$p" run true >/dev/null 2>&1 || true
 
-    [[ -f "$p/.bx/home/.pi/agent/auth.json" ]] || return 1
-    [[ -f "$p/.bx/home/.pi/agent/mcp.json" ]] || return 1
-    jq -e '.mcpServers == {}' "$p/.bx/home/.pi/agent/mcp.json" >/dev/null || return 1
-    [[ ! -e "$p/.bx/home/.pi/agent/settings.json" ]] || return 1
-    [[ ! -e "$p/.bx/home/.pi/agent/models.json" ]]
+    jq -e '.defaultProvider == "openai-codex" and .defaultModel == "gpt-5.3-codex" and .defaultThinkingLevel == "medium" and .enabledModels == ["gpt-*"]' "$sandbox_settings" >/dev/null || return 1
+    jq -e 'has("packages") | not' "$sandbox_settings" >/dev/null || return 1
+    cmp -s "$HOST_HOME/.pi/agent/models.json" "$sandbox_models" || return 1
+
+    printf '%s\n' '{"other":true}' > "$HOST_HOME/.pi/agent/settings.json"
+    rm -f "$HOST_HOME/.pi/agent/models.json"
+    bx_cmd "$p" run true >/dev/null 2>&1 || true
+
+    jq -e '(. | has("defaultProvider") | not) and (. | has("defaultModel") | not) and (. | has("defaultThinkingLevel") | not) and (. | has("enabledModels") | not)' "$sandbox_settings" >/dev/null || return 1
+    [[ ! -e "$sandbox_models" ]]
 }
 
 test_9_mount_add_creates_entry() {
@@ -573,7 +606,8 @@ main() {
     run_test "7) CODEX=on: bx run true copies .codex/auth.json" test_6_codex_on_copies_auth_json
     run_test "8) CODEX=off: bx run true leaves .codex/auth.json absent" test_7_codex_off_skips_auth_json
     run_test "8b) CODEX=on: bx run generates trust config and refreshes auth.json" test_8_codex_run_generates_trust_config_and_refreshes_auth
-    run_test "8c) bx run copies pi auth.json and writes empty mcp.json" test_8c_pi_run_copies_auth_and_stubs_mcp
+    run_test "8c) bx run syncs pi auth/models and targeted settings" test_8c_pi_run_syncs_auth_models_and_targeted_settings
+    run_test "8d) bx run refreshes pi model keys and removes stale models.json" test_8d_pi_run_syncs_model_keys_and_refreshes_models_json
     run_test "9) bx mount add creates entry in .bx/mounts" test_9_mount_add_creates_entry
     run_test "10) bx mount add [ro] creates :ro entry" test_10_mount_add_ro_creates_ro_entry
     run_test "11) bx mount list shows entries" test_11_mount_list_shows_entries
