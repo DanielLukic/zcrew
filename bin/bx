@@ -79,6 +79,24 @@ resolve_workdir() {
     fi
 }
 
+seed_claude_sandbox_state() {
+    local workdir="$1"
+    mkdir -p "$HOME_DIR/.claude"
+    printf '{"theme":"dark","model":"sonnet","skipDangerousModePermissionPrompt":true}\n' > "$HOME_DIR/.claude/settings.json"
+    jq -cn --arg workdir "$workdir" '{hasCompletedOnboarding:true,projects:{($workdir):{hasTrustDialogAccepted:true}}}' > "$HOME_DIR/.claude.json"
+}
+
+write_codex_sandbox_config() {
+    local workdir="$1"
+    mkdir -p "$HOME_DIR/.codex"
+    printf '[projects."%s"]\ntrust_level = "trusted"\n' "$workdir" > "$HOME_DIR/.codex/config.toml"
+}
+
+seed_pi_sandbox_state() {
+    mkdir -p "$HOME_DIR/.pi/agent"
+    printf '{"mcpServers":{}}\n' > "$HOME_DIR/.pi/agent/mcp.json"
+}
+
 load_config() {
     if [[ ! -f "$CONFIG_FILE" ]]; then
         echo "No .bx/config found. Run 'bx init' first." >&2
@@ -299,11 +317,9 @@ cmd_init() {
     mkdir -p \
         "$HOME_DIR/.local" \
         "$HOME_DIR/.claude" \
+        "$HOME_DIR/.pi/agent" \
         "$HOME_DIR/.config/mise" \
         "$HOME_DIR/.ssh"
-
-    # Minimal claude settings (avoids theme picker on first run)
-    echo '{"theme":"dark","model":"sonnet","skipDangerousModePermissionPrompt":true}' > "$HOME_DIR/.claude/settings.json"
 
     cat > "$CONFIG_FILE" <<EOF
 WORKDIR=$workdir
@@ -339,23 +355,23 @@ run_bwrap() {
     # Sync auth files from host on every entry (tokens refresh daily, inode changes)
     if [[ "${CLAUDE:-on}" == "on" ]]; then
         mkdir -p "$HOME_DIR/.claude"
-        if [[ -f "$HOME/.claude.json" ]] && [[ ! "$HOME/.claude.json" -ef "$HOME_DIR/.claude.json" ]]; then
-            cp "$HOME/.claude.json" "$HOME_DIR/.claude.json"
-        fi
         if [[ -f "$HOME/.claude/.credentials.json" ]] && [[ ! "$HOME/.claude/.credentials.json" -ef "$HOME_DIR/.claude/.credentials.json" ]]; then
             cp "$HOME/.claude/.credentials.json" "$HOME_DIR/.claude/.credentials.json"
         fi
     fi
 
-    # Sync codex auth + config on every entry (auth.json replaced atomically on refresh)
+    # Sync codex auth on every entry (auth.json replaced atomically on refresh)
     if [[ "${CODEX:-on}" == "on" ]] && [[ -d "$HOME/.codex" ]]; then
         mkdir -p "$HOME_DIR/.codex"
         if [[ -f "$HOME/.codex/auth.json" ]] && [[ ! "$HOME/.codex/auth.json" -ef "$HOME_DIR/.codex/auth.json" ]]; then
             cp "$HOME/.codex/auth.json" "$HOME_DIR/.codex/auth.json"
         fi
-        if [[ -f "$HOME/.codex/config.toml" ]] && [[ ! "$HOME/.codex/config.toml" -ef "$HOME_DIR/.codex/config.toml" ]]; then
-            cp "$HOME/.codex/config.toml" "$HOME_DIR/.codex/config.toml"
-        fi
+    fi
+
+    # Sync pi auth on every entry; keep MCP config sandbox-local
+    if [[ -f "$HOME/.pi/agent/auth.json" ]] && [[ ! "$HOME/.pi/agent/auth.json" -ef "$HOME_DIR/.pi/agent/auth.json" ]]; then
+        mkdir -p "$HOME_DIR/.pi/agent"
+        cp "$HOME/.pi/agent/auth.json" "$HOME_DIR/.pi/agent/auth.json"
     fi
 
     local workdir
@@ -363,15 +379,15 @@ run_bwrap() {
     local workdir_parent
     workdir_parent=$(dirname "$workdir")
 
-    if [[ "${CODEX:-on}" == "on" ]] && [[ -f "$HOME_DIR/.codex/config.toml" ]]; then
-        if ! grep -Fq "[projects.\"$workdir\"]" "$HOME_DIR/.codex/config.toml"; then
-            {
-                [[ -s "$HOME_DIR/.codex/config.toml" ]] && printf '\n'
-                printf '[projects."%s"]\n' "$workdir"
-                printf 'trust_level = "trusted"\n'
-            } >> "$HOME_DIR/.codex/config.toml"
-        fi
+    if [[ "${CLAUDE:-on}" == "on" ]]; then
+        seed_claude_sandbox_state "$workdir"
     fi
+
+    if [[ "${CODEX:-on}" == "on" ]]; then
+        write_codex_sandbox_config "$workdir"
+    fi
+
+    seed_pi_sandbox_state
 
     local args=(
         --unshare-user --uid "$(id -u)" --gid "$(id -g)"

@@ -19,11 +19,15 @@ trap cleanup EXIT
 
 prepare_host_home() {
     rm -rf "$HOST_HOME"
-    mkdir -p "$HOST_HOME/.claude" "$HOST_HOME/.codex"
+    mkdir -p "$HOST_HOME/.claude" "$HOST_HOME/.codex" "$HOST_HOME/.pi/agent"
     printf '{"dummy":true}\n' > "$HOST_HOME/.claude.json"
     printf '{"dummy":true}\n' > "$HOST_HOME/.claude/.credentials.json"
     printf '{"dummy":true}\n' > "$HOST_HOME/.codex/auth.json"
     printf 'model = "dummy"\n' > "$HOST_HOME/.codex/config.toml"
+    printf '{"providers":{"openai-codex":{"token":"dummy"}}}\n' > "$HOST_HOME/.pi/agent/auth.json"
+    printf '{"mcpServers":{"host":{}}}\n' > "$HOST_HOME/.pi/agent/mcp.json"
+    printf '{"defaultProvider":"host"}\n' > "$HOST_HOME/.pi/agent/settings.json"
+    printf '{"providers":{"custom":{}}}\n' > "$HOST_HOME/.pi/agent/models.json"
     if [[ ! -d "$HOME/.local" ]]; then
         echo "skip: $HOME/.local not present"
         HOST_LOCAL_AVAILABLE=0
@@ -152,7 +156,7 @@ test_4_old_config_missing_codex_no_crash() {
     bx_cmd "$p" codex >/dev/null 2>&1
 }
 
-test_4_claude_on_copies_claude_json() {
+test_4_claude_on_generates_minimal_state_and_copies_credentials() {
     local p
     p="$(new_project_dir test5)"
 
@@ -161,7 +165,9 @@ test_4_claude_on_copies_claude_json() {
     bx_cmd "$p" run true >/dev/null 2>&1 || true
 
     [[ -f "$p/.bx/home/.claude.json" ]] || return 1
-    [[ -f "$p/.bx/home/.claude/.credentials.json" ]]
+    [[ -f "$p/.bx/home/.claude/.credentials.json" ]] || return 1
+    jq -e --arg p "$p" '.hasCompletedOnboarding == true and .projects[$p].hasTrustDialogAccepted == true' "$p/.bx/home/.claude.json" >/dev/null || return 1
+    ! grep -Fq '"dummy":true' "$p/.bx/home/.claude.json"
 }
 
 test_4b_claude_on_recreates_missing_claude_dir() {
@@ -213,7 +219,7 @@ test_7_codex_off_skips_auth_json() {
     [[ ! -f "$p/.bx/home/.codex/auth.json" ]]
 }
 
-test_8_codex_run_copies_host_config_injects_trust_and_refreshes_auth() {
+test_8_codex_run_generates_trust_config_and_refreshes_auth() {
     local p sandbox_conf sandbox_auth
     p="$(new_project_dir test8b)"
     sandbox_conf="$p/.bx/home/.codex/config.toml"
@@ -230,11 +236,25 @@ test_8_codex_run_copies_host_config_injects_trust_and_refreshes_auth() {
 
     bx_cmd "$p" run true >/dev/null 2>&1 || true
 
-    grep -Fxq 'host_pref = "from-host"' "$sandbox_conf" || return 1
+    ! grep -Fxq 'host_pref = "from-host"' "$sandbox_conf" || return 1
     ! grep -Fxq 'sandbox_pref = "keep-me"' "$sandbox_conf" || return 1
     grep -Fxq "[projects.\"$p\"]" "$sandbox_conf" || return 1
     grep -Fxq 'trust_level = "trusted"' "$sandbox_conf" || return 1
     grep -Fq '"fresh-host-token"' "$sandbox_auth"
+}
+
+test_8c_pi_run_copies_auth_and_stubs_mcp() {
+    local p
+    p="$(new_project_dir test8c)"
+
+    bx_cmd "$p" init >/dev/null 2>&1 || return 1
+    bx_cmd "$p" run true >/dev/null 2>&1 || true
+
+    [[ -f "$p/.bx/home/.pi/agent/auth.json" ]] || return 1
+    [[ -f "$p/.bx/home/.pi/agent/mcp.json" ]] || return 1
+    jq -e '.mcpServers == {}' "$p/.bx/home/.pi/agent/mcp.json" >/dev/null || return 1
+    [[ ! -e "$p/.bx/home/.pi/agent/settings.json" ]] || return 1
+    [[ ! -e "$p/.bx/home/.pi/agent/models.json" ]]
 }
 
 test_9_mount_add_creates_entry() {
@@ -547,12 +567,13 @@ main() {
     run_test "2) bx claude off/on toggles work" test_2_claude_toggle
     run_test "3) bx claude (no arg) on old config missing CLAUDE does not crash" test_3_old_config_missing_claude_no_crash
     run_test "4) bx codex (no arg) on old config missing CODEX does not crash" test_4_old_config_missing_codex_no_crash
-    run_test "5) CLAUDE=on: bx run true copies .claude.json and .claude/.credentials.json" test_4_claude_on_copies_claude_json
+    run_test "5) CLAUDE=on: bx run true generates minimal .claude.json and copies .credentials.json" test_4_claude_on_generates_minimal_state_and_copies_credentials
     run_test "5b) CLAUDE=on: bx run recreates missing .bx/home/.claude dir" test_4b_claude_on_recreates_missing_claude_dir
     run_test "6) CLAUDE=off: bx run true leaves .claude.json and .claude/.credentials.json absent" test_5_claude_off_skips_claude_json
     run_test "7) CODEX=on: bx run true copies .codex/auth.json" test_6_codex_on_copies_auth_json
     run_test "8) CODEX=off: bx run true leaves .codex/auth.json absent" test_7_codex_off_skips_auth_json
-    run_test "8b) CODEX=on: bx run copies host config, injects trust, and refreshes auth.json" test_8_codex_run_copies_host_config_injects_trust_and_refreshes_auth
+    run_test "8b) CODEX=on: bx run generates trust config and refreshes auth.json" test_8_codex_run_generates_trust_config_and_refreshes_auth
+    run_test "8c) bx run copies pi auth.json and writes empty mcp.json" test_8c_pi_run_copies_auth_and_stubs_mcp
     run_test "9) bx mount add creates entry in .bx/mounts" test_9_mount_add_creates_entry
     run_test "10) bx mount add [ro] creates :ro entry" test_10_mount_add_ro_creates_ro_entry
     run_test "11) bx mount list shows entries" test_11_mount_list_shows_entries

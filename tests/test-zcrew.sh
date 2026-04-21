@@ -1280,7 +1280,8 @@ test_35_send_claude_target_refreshes_auth_files() {
   after_creds="$(stat -c %Y "$target_home/.claude/.credentials.json")"
   [[ "$after_json" -gt "$before_json" ]] || return 1
   [[ "$after_creds" -gt "$before_creds" ]] || return 1
-  grep -Fq '"fresh":"json"' "$target_home/.claude.json" || return 1
+  jq -e --arg cwd "$target_cwd" '.hasCompletedOnboarding == true and .projects[$cwd].hasTrustDialogAccepted == true' "$target_home/.claude.json" >/dev/null || return 1
+  ! grep -Fq '"fresh":"json"' "$target_home/.claude.json" || return 1
   grep -Fq '"accessToken":"fresh"' "$target_home/.claude/.credentials.json" || return 1
 }
 
@@ -1352,7 +1353,7 @@ test_37_send_unknown_target_skips_claude_auth_refresh() {
   [[ "$after_creds" -eq "$before_creds" ]] || return 1
 }
 
-test_38_send_missing_host_claude_json_soft_fails() {
+test_38_send_missing_host_claude_json_generates_minimal_target_state() {
   local d target_cwd target_home mockbin args_file host_home
   d="$(new_test_dir 38)"
   target_cwd="$d/target-pane"
@@ -1376,7 +1377,7 @@ test_38_send_missing_host_claude_json_soft_fails() {
   ) || return 1
 
   [[ -f "$args_file" ]] || return 1
-  [[ ! -e "$target_home/.claude.json" ]]
+  jq -e --arg cwd "$target_cwd" '.hasCompletedOnboarding == true and .projects[$cwd].hasTrustDialogAccepted == true' "$target_home/.claude.json" >/dev/null || return 1
 }
 
 test_39_send_missing_host_credentials_soft_fails() {
@@ -1597,7 +1598,7 @@ main() {
   run_test "35) send to claude target refreshes auth in .bx/home" test_35_send_claude_target_refreshes_auth_files
   run_test "36) send to codex target skips claude auth refresh" test_36_send_codex_target_skips_claude_auth_refresh
   run_test "37) send to unknown target skips claude auth refresh" test_37_send_unknown_target_skips_claude_auth_refresh
-  run_test "38) send with missing host .claude.json soft-fails" test_38_send_missing_host_claude_json_soft_fails
+  run_test "38) send with missing host .claude.json generates minimal target state" test_38_send_missing_host_claude_json_generates_minimal_target_state
   run_test "39) send with missing host credentials soft-fails" test_39_send_missing_host_credentials_soft_fails
   run_test "40) send without target .bx/home soft-fails" test_40_send_without_target_bx_home_soft_fails
   run_test "41) successful claude auth refresh leaves no tmp files" test_41_send_claude_refresh_leaves_no_tmp_files

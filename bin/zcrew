@@ -146,10 +146,6 @@ ensure_bx_managed_mounts() {
   local zellij_sock_dir="/run/user/$(id -u)/zellij"
   local managed_dsts=("$zellij_sock_dir")
   local canonical_lines=("$zellij_sock_dir $zellij_sock_dir rw")
-  if [[ -d "$HOME/.pi" ]]; then
-    managed_dsts+=("$HOME/.pi")
-    canonical_lines+=("$HOME/.pi $HOME/.pi rw")
-  fi
 
   local tmp="$mounts_file.tmp.$$"
   local line
@@ -432,19 +428,24 @@ cmd_spawn() {
     model_prefix="export ZCREW_MODEL=$(printf '%q' "$model"); "
   fi
   local out
-  out=$(zellij action new-pane --cwd "$PROJECT_DIR" --name "$name" -- bash -c "$trap_cmd; ${model_prefix}$launch_cmd" 2>&1)
+  local _stderr_file
+  _stderr_file=$(mktemp)
+  out=$(zellij action new-pane --cwd "$PROJECT_DIR" --name "$name" -- bash -c "$trap_cmd; ${model_prefix}$launch_cmd" 2>"$_stderr_file")
   local rc=$?
   logger "spawn" "info" "new-pane returned rc=$rc out='$out'"
 
   if [[ $rc -ne 0 ]]; then
-    echo "zcrew: zellij action new-pane failed: $out" >&2
+    echo "zcrew: zellij action new-pane failed: $(cat "$_stderr_file")" >&2
+    rm -f "$_stderr_file"
     exit 1
   fi
+  rm -f "$_stderr_file"
 
-  # STEP 2: parse pane ID from new-pane stdout (e.g. "terminal_5" → "5")
-  # and write a registry entry. Still no wrapper, no bx, no agent launch.
-  local pane_id="${out#terminal_}"
-  if [[ -z "$pane_id" || "$pane_id" == "$out" ]]; then
+  # STEP 2: parse pane ID from new-pane stdout (e.g. "terminal_5" → "5").
+  # grep -m1 guards against stray lines in $out.
+  local pane_id
+  pane_id=$(printf '%s\n' "$out" | grep -m1 '^terminal_' | sed 's/^terminal_//')
+  if [[ -z "$pane_id" ]]; then
     logger "spawn" "warn" "could not parse pane id from new-pane output: $out"
     pane_id="?"
   fi
@@ -756,6 +757,29 @@ lookup_registered_cwd() {
   jq -r --arg name "$name" '.panes[$name].cwd // empty' "$REGISTRY_FILE"
 }
 
+write_claude_target_state() {
+  local dst_home="$1"
+  local target_cwd="$2"
+
+  mkdir -p "$dst_home/.claude" 2>/dev/null || return 1
+
+  local tmp_settings="$dst_home/.claude/settings.json.tmp.$$"
+  printf '{"skipDangerousModePermissionPrompt":true}\n' > "$tmp_settings" || return 1
+  chmod 600 "$tmp_settings" 2>/dev/null || true
+  mv "$tmp_settings" "$dst_home/.claude/settings.json" 2>/dev/null || return 1
+
+  local tmp_json="$dst_home/.claude.json.tmp.$$"
+  if ! jq -cn --arg workdir "$target_cwd" '{hasCompletedOnboarding:true,projects:{($workdir):{hasTrustDialogAccepted:true}}}' > "$tmp_json"; then
+    rm -f "$tmp_json"
+    return 1
+  fi
+  chmod 600 "$tmp_json" 2>/dev/null || true
+  mv "$tmp_json" "$dst_home/.claude.json" 2>/dev/null || {
+    rm -f "$tmp_json"
+    return 1
+  }
+}
+
 refresh_claude_auth_for_target() {
   local target_cwd="${1:-}"
   local target_agent="${2:-}"
@@ -771,32 +795,14 @@ refresh_claude_auth_for_target() {
   fi
   [[ -n "$host_home" ]] || return 0
 
-  local src_json="$host_home/.claude.json"
   local src_creds="$host_home/.claude/.credentials.json"
-  [[ -f "$src_json" ]] || { logger "send" "warn" "no host .claude.json to sync"; return 0; }
   [[ -f "$src_creds" ]] || { logger "send" "warn" "no host .credentials.json to sync"; return 0; }
 
-  local tmp_json="$dst_home/.claude.json.tmp.$$"
-  if ! cp "$src_json" "$tmp_json" 2>/dev/null; then
-    rm -f "$tmp_json"
-    logger "send" "warn" "copy .claude.json failed"
-    return 0
-  fi
-  if ! chmod 600 "$tmp_json" 2>/dev/null; then
-    rm -f "$tmp_json"
-    logger "send" "warn" "chmod .claude.json failed"
-    return 0
-  fi
-  if ! mv "$tmp_json" "$dst_home/.claude.json" 2>/dev/null; then
-    rm -f "$tmp_json"
-    logger "send" "warn" "move .claude.json failed"
+  if ! write_claude_target_state "$dst_home" "$target_cwd"; then
+    logger "send" "warn" "write sandbox claude state failed"
     return 0
   fi
 
-  mkdir -p "$dst_home/.claude" 2>/dev/null || {
-    logger "send" "warn" "mkdir .claude failed"
-    return 0
-  }
   local tmp_creds="$dst_home/.claude/.credentials.json.tmp.$$"
   if ! cp "$src_creds" "$tmp_creds" 2>/dev/null; then
     rm -f "$tmp_creds"
