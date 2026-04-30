@@ -497,6 +497,10 @@ install_bootstrap() {
   local target="$1"
   write_managed_mise_floor "$target"
   echo "    .config/mise.toml (zcrew managed floor)"
+  if command -v mise >/dev/null 2>&1; then
+    mise trust "$target/.config/mise.toml" >/dev/null 2>&1 || true
+    echo "    .config/mise.toml (trusted)"
+  fi
   (
     cd "$target"
     env -u BX_INSIDE ./bin/bx init >/dev/null
