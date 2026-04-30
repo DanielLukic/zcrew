@@ -250,6 +250,9 @@ write_managed_mise_floor() {
   cat > "$mise_file" <<EOF
 # Managed by zcrew install — do not edit manually.
 # Project-specific overrides go in .mise.toml (higher precedence).
+[tools]
+node = "lts"
+
 [env]
 _.path = ["bin"]
 EOF
@@ -492,20 +495,18 @@ cmd_unregister() {
 
 install_bootstrap() {
   local target="$1"
-  if [[ ! -d "$target/.bx" ]]; then
-    (
-      cd "$target"
-      env -u BX_INSIDE ./bin/bx init >/dev/null
-    )
-    echo "    .bx/ (initialized via bx init)"
-  fi
-  if [[ ! -d "$target/.zcrew" ]]; then
-    (
-      cd "$target"
-      ./bin/zcrew init >/dev/null
-    )
-    echo "    .zcrew/ (initialized via zcrew init)"
-  fi
+  write_managed_mise_floor "$target"
+  echo "    .config/mise.toml (zcrew managed floor)"
+  (
+    cd "$target"
+    env -u BX_INSIDE ./bin/bx init >/dev/null
+  )
+  echo "    .bx/ (bx init — idempotent)"
+  (
+    cd "$target"
+    ./bin/zcrew init >/dev/null
+  )
+  echo "    .zcrew/ (zcrew init — idempotent)"
   if [[ -d "$target/.bx" ]]; then
     ensure_gitignore_lines "$target/.bx/.gitignore" \
       "home/" \
@@ -639,9 +640,6 @@ cmd_install() {
     chmod +x "$target/lib/zcrew/launchers/$l.sh"
     echo "    lib/zcrew/launchers/$l.sh"
   done
-
-  write_managed_mise_floor "$target"
-  echo "    .config/mise.toml (zcrew managed floor)"
 
   install_bootstrap "$target"
 
