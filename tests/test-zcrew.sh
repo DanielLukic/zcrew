@@ -839,6 +839,9 @@ test_18b_install_writes_managed_mise_floor() {
   cat > "$d/expected-mise.toml" <<EOF
 # Managed by zcrew install — do not edit manually.
 # Project-specific overrides go in .mise.toml (higher precedence).
+[tools]
+node = "lts"
+
 [env]
 _.path = ["bin"]
 EOF
@@ -863,7 +866,8 @@ EOF
 
   grep -Fxq '# Managed by zcrew install — do not edit manually.' "$real_dir/.config/mise.toml" || return 1
   grep -Fxq '# Project-specific overrides go in .mise.toml (higher precedence).' "$real_dir/.config/mise.toml" || return 1
-  ! grep -Fq '[tools]' "$real_dir/.config/mise.toml" || return 1
+  grep -Fxq '[tools]' "$real_dir/.config/mise.toml" || return 1
+  grep -Fxq 'node = "lts"' "$real_dir/.config/mise.toml" || return 1
   grep -Fxq '[env]' "$real_dir/.config/mise.toml" || return 1
   ! grep -Fq 'ZCREW_PROJECT_DIR' "$real_dir/.config/mise.toml" || return 1
   grep -Fxq '_.path = ["bin"]' "$real_dir/.config/mise.toml"
@@ -895,7 +899,7 @@ EOF
   [[ "$before" == "$after" ]]
 }
 
-test_18f_install_does_not_invoke_mise() {
+test_18f_install_trusts_managed_mise_floor_when_mise_exists() {
   local d mockbin args_file
   d="$(new_test_dir 18f)"
   mockbin="$d/mock-bin"
@@ -908,7 +912,8 @@ test_18f_install_does_not_invoke_mise() {
     ZCREW_AUTO_SYNC=0 PATH="$mockbin:$PATH" MOCK_MISE_ARGS_FILE="$args_file" "$ZCREW_BIN" install "$d" >/dev/null 2>&1
   ) || return 1
 
-  [[ ! -f "$args_file" ]]
+  [[ -f "$args_file" ]] || return 1
+  grep -Fxq "$TEST_ROOT:trust $d/.config/mise.toml" "$args_file"
 }
 
 test_19_find_project_root_from_root_uses_local_state() {
@@ -1831,7 +1836,7 @@ main() {
   run_test "18c) reinstall overwrites managed mise floor with canonical root" test_18c_reinstall_overwrites_managed_mise_floor_with_canonical_path
   run_test "18d) install no longer creates .envrc" test_18d_install_does_not_create_envrc
   run_test "18e) install leaves existing .envrc untouched" test_18e_install_preserves_existing_envrc_content
-  run_test "18f) install does not invoke mise" test_18f_install_does_not_invoke_mise
+  run_test "18f) install trusts managed mise floor when mise exists" test_18f_install_trusts_managed_mise_floor_when_mise_exists
   run_test "19) find_project_root uses state from project root" test_19_find_project_root_from_root_uses_local_state
   run_test "20) find_project_root walks up from subdir" test_20_find_project_root_walks_up_from_subdir
   run_test "20b) find_project_root fails outside zcrew tree" test_20b_find_project_root_fails_outside_zcrew_tree
