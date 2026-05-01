@@ -504,6 +504,75 @@ test_9c_send_without_compact_calls_tell_once() {
   [[ "$(grep -c '^123 hello once' "$args_file")" -eq 1 ]]
 }
 
+test_9d_send_slash_command_skips_banner_from_host() {
+  local d mockbin args_file sent
+  d="$(new_test_dir 9d)"
+  mockbin="$d/mock-bin"
+  args_file="$d/tell-args.txt"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register buddy --paneId 123 --sessionId s --agent claude --cwd "$d" --pid 1 --status alive >/dev/null 2>&1 || return 1
+  prepare_send_test_tools "$d" "$mockbin" "$args_file"
+
+  (
+    cd "$d" || exit 1
+    env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" \
+      ZELLIJ_SESSION_NAME="test-session" \
+      ZELLIJ_PANE_ID="0" \
+      "$ZCREW_BIN" send buddy "/compact" >/dev/null 2>&1
+  ) || return 1
+
+  sent="$(cat "$args_file")"
+  [[ "$sent" == '123 /compact' ]] || return 1
+  ! grep -Fq 'To report a result, finding, blocker, or question' "$args_file"
+}
+
+test_9e_send_arbitrary_slash_command_skips_banner_from_host() {
+  local d mockbin args_file sent
+  d="$(new_test_dir 9e)"
+  mockbin="$d/mock-bin"
+  args_file="$d/tell-args.txt"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register buddy --paneId 123 --sessionId s --agent claude --cwd "$d" --pid 1 --status alive >/dev/null 2>&1 || return 1
+  prepare_send_test_tools "$d" "$mockbin" "$args_file"
+
+  (
+    cd "$d" || exit 1
+    env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" \
+      ZELLIJ_SESSION_NAME="test-session" \
+      ZELLIJ_PANE_ID="0" \
+      "$ZCREW_BIN" send buddy "/anything" >/dev/null 2>&1
+  ) || return 1
+
+  sent="$(cat "$args_file")"
+  [[ "$sent" == '123 /anything' ]] || return 1
+  ! grep -Fq 'To report a result, finding, blocker, or question' "$args_file"
+}
+
+test_9f_send_path_like_message_keeps_banner_from_host() {
+  local d mockbin args_file sent
+  d="$(new_test_dir 9f)"
+  mockbin="$d/mock-bin"
+  args_file="$d/tell-args.txt"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register buddy --paneId 123 --sessionId s --agent claude --cwd "$d" --pid 1 --status alive >/dev/null 2>&1 || return 1
+  prepare_send_test_tools "$d" "$mockbin" "$args_file"
+
+  (
+    cd "$d" || exit 1
+    env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" \
+      ZELLIJ_SESSION_NAME="test-session" \
+      ZELLIJ_PANE_ID="0" \
+      "$ZCREW_BIN" send buddy "/path/to/file" >/dev/null 2>&1
+  ) || return 1
+
+  sent="$(cat "$args_file")"
+  [[ "$sent" == 123\ /path/to/file* ]] || return 1
+  grep -Fq 'To report a result, finding, blocker, or question' "$args_file"
+}
+
 test_10_sync_no_prune_marks_stale_not_delete() {
   local d mockbin
   d="$(new_test_dir 10)"
@@ -1935,6 +2004,9 @@ main() {
   run_test "9) send calls tell with paneId and message" test_9_send_calls_tell_with_expected_args
   run_test "9b) send --compact calls tell twice with a compaction delay" test_9b_send_compact_calls_tell_twice_with_delay
   run_test "9c) send without --compact still calls tell once" test_9c_send_without_compact_calls_tell_once
+  run_test "9d) send /compact from host skips banner" test_9d_send_slash_command_skips_banner_from_host
+  run_test "9e) send arbitrary slash command from host skips banner" test_9e_send_arbitrary_slash_command_skips_banner_from_host
+  run_test "9f) send path-like slash message from host keeps banner" test_9f_send_path_like_message_keeps_banner_from_host
   run_test "10) sync without prune marks stale but keeps entries" test_10_sync_no_prune_marks_stale_not_delete
   run_test "11) spawn unknown agent uses bx fallback" test_11_spawn_unknown_agent_uses_bx_fallback
   run_test "11b) spawn duplicate name fails before opening a pane" test_11b_spawn_duplicate_name_fails_before_new_pane
