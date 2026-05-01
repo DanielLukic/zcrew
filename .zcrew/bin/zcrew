@@ -249,6 +249,60 @@ zcrew_owned_lib_files() {
   printf '%s\n' tell launchers/claude.sh launchers/codex.sh launchers/pi.sh
 }
 
+keep_symlink_target_for() {
+  local rel="$1"
+  case "$rel" in
+    bin/*) printf '../.zcrew/bin/%s\n' "${rel#bin/}" ;;
+    lib/zcrew/tell) printf '../../.zcrew/lib/tell\n' ;;
+    lib/zcrew/launchers/*) printf '../../../.zcrew/lib/launchers/%s\n' "${rel#lib/zcrew/launchers/}" ;;
+    *) return 1 ;;
+  esac
+}
+
+owned_source_path_for() {
+  local src_root="$1"
+  local rel="$2"
+  case "$rel" in
+    bin/*) printf '%s/.zcrew/bin/%s\n' "$src_root" "${rel#bin/}" ;;
+    lib/zcrew/*) printf '%s/.zcrew/lib/%s\n' "$src_root" "${rel#lib/zcrew/}" ;;
+    *) return 1 ;;
+  esac
+}
+
+is_keep_symlink() {
+  local file="$1"
+  local root="$2"
+  local rel expected
+  rel="${file#"$root"/}"
+  expected="$(keep_symlink_target_for "$rel")" || return 1
+  [[ -L "$file" && "$(readlink "$file")" == "$expected" ]]
+}
+
+create_keep_symlinks() {
+  local root="$1"
+  local rel dst expected
+  mkdir -p "$root/bin" "$root/lib/zcrew/launchers"
+  while IFS= read -r rel; do
+    dst="$root/bin/$rel"
+    expected="$(keep_symlink_target_for "bin/$rel")"
+    if [[ -e "$dst" && ! -L "$dst" ]]; then
+      echo "warning: keeping existing non-symlink at bin/$rel" >&2
+      continue
+    fi
+    ln -sf "$expected" "$dst"
+  done < <(zcrew_owned_bin_files)
+  while IFS= read -r rel; do
+    dst="$root/lib/zcrew/$rel"
+    expected="$(keep_symlink_target_for "lib/zcrew/$rel")"
+    mkdir -p "$(dirname "$dst")"
+    if [[ -e "$dst" && ! -L "$dst" ]]; then
+      echo "warning: keeping existing non-symlink at lib/zcrew/$rel" >&2
+      continue
+    fi
+    ln -sf "$expected" "$dst"
+  done < <(zcrew_owned_lib_files)
+}
+
 verify_managed_layout() {
   local root="$1"
   local rel
@@ -290,23 +344,58 @@ has_stale_layout() {
 
 remove_stale_layout() {
   local root="$1"
-  local rel unexpected=false
+  local delete_real="${2:-false}"
+  local src_root="${3:-}"
+  local rel src_path
   while IFS= read -r rel; do
-    rm -f "$root/bin/$rel"
+    local path="$root/bin/$rel"
+    src_path=""
+    [[ -n "$src_root" ]] && src_path="$(owned_source_path_for "$src_root" "bin/$rel")"
+    if [[ -L "$path" ]]; then
+      if is_keep_symlink "$path" "$root"; then
+        rm -f "$path"
+      elif [[ "$delete_real" == "true" && -n "$src_path" && -e "$src_path" && "$(readlink -f "$path" 2>/dev/null || true)" == "$(readlink -f "$src_path")" ]]; then
+        rm -f "$path"
+      else
+        echo "warning: leaving existing non-zcrew symlink at bin/$rel" >&2
+      fi
+    elif [[ -e "$path" ]]; then
+      if [[ "$delete_real" == "true" && -n "$src_path" && -e "$src_path" ]] && cmp -s "$path" "$src_path"; then
+        rm -f "$path"
+      else
+        echo "warning: keeping existing non-symlink at bin/$rel" >&2
+      fi
+    fi
   done < <(zcrew_owned_bin_files)
   rmdir --ignore-fail-on-non-empty "$root/bin" 2>/dev/null || true
 
   if [[ -d "$root/lib/zcrew" ]]; then
     while IFS= read -r rel; do
-      rm -f "$root/lib/zcrew/$rel"
+      local path="$root/lib/zcrew/$rel"
+      src_path=""
+      [[ -n "$src_root" ]] && src_path="$(owned_source_path_for "$src_root" "lib/zcrew/$rel")"
+      if [[ -L "$path" ]]; then
+        if is_keep_symlink "$path" "$root"; then
+          rm -f "$path"
+        elif [[ "$delete_real" == "true" && -n "$src_path" && -e "$src_path" && "$(readlink -f "$path" 2>/dev/null || true)" == "$(readlink -f "$src_path")" ]]; then
+          rm -f "$path"
+        else
+          echo "warning: leaving existing non-zcrew symlink at lib/zcrew/$rel" >&2
+        fi
+      elif [[ -e "$path" ]]; then
+        if [[ "$delete_real" == "true" && -n "$src_path" && -e "$src_path" ]] && cmp -s "$path" "$src_path"; then
+          rm -f "$path"
+        else
+          echo "warning: keeping existing non-symlink at lib/zcrew/$rel" >&2
+        fi
+      fi
     done < <(zcrew_owned_lib_files)
 
     local path
     while IFS= read -r path; do
       [[ -n "$path" ]] || continue
-      unexpected=true
       echo "warning: unexpected files under legacy lib/zcrew preserved: $path" >&2
-    done < <(cd "$root/lib/zcrew" && find . -type f | sed 's#^\./##' | sort)
+    done < <(cd "$root/lib/zcrew" && find . \( -type f -o -type l \) | sed 's#^\./##' | sort)
 
     rmdir --ignore-fail-on-non-empty "$root/lib/zcrew/launchers" 2>/dev/null || true
     rmdir --ignore-fail-on-non-empty "$root/lib/zcrew" 2>/dev/null || true
@@ -609,8 +698,23 @@ install_bootstrap() {
 # Copies .zcrew-owned bin/lib content plus skills and managed config.
 cmd_install() {
   CURRENT_SUBCMD="install"
-  local target="${1:-}"
-  [[ -n "$target" ]] || { echo "Usage: zcrew install <target-project-dir>" >&2; exit 1; }
+  local target=""
+  local keep_compat=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --keep) keep_compat=true ;;
+      --*) echo "Usage: zcrew install [--keep] <target-project-dir>" >&2; exit 1 ;;
+      *)
+        if [[ -n "$target" ]]; then
+          echo "Usage: zcrew install [--keep] <target-project-dir>" >&2
+          exit 1
+        fi
+        target="$1"
+        ;;
+    esac
+    shift
+  done
+  [[ -n "$target" ]] || { echo "Usage: zcrew install [--keep] <target-project-dir>" >&2; exit 1; }
   [[ -d "$target" ]] || { echo "zcrew: target dir does not exist: $target" >&2; exit 1; }
   local target_abs
   target_abs=$(realpath "$target")
@@ -713,7 +817,14 @@ cmd_install() {
   rmdir --ignore-fail-on-non-empty "$target/.claude/hooks" 2>/dev/null || true
 
   if [[ "$stale" == "true" ]]; then
+    remove_stale_layout "$target" true "$src"
+  elif [[ "$keep_compat" != "true" ]]; then
     remove_stale_layout "$target"
+  fi
+
+  if [[ "$keep_compat" == "true" ]]; then
+    create_keep_symlinks "$target"
+    echo "    bin/zcrew etc. are now symlinks (transitional); add to .gitignore yourself if desired"
   fi
 
   install_bootstrap "$target"
