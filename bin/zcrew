@@ -250,9 +250,6 @@ write_managed_mise_floor() {
   cat > "$mise_file" <<EOF
 # Managed by zcrew install — do not edit manually.
 # Project-specific overrides go in .mise.toml (higher precedence).
-[tools]
-node = "lts"
-
 [env]
 _.path = ["bin"]
 EOF
@@ -497,10 +494,6 @@ install_bootstrap() {
   local target="$1"
   write_managed_mise_floor "$target"
   echo "    .config/mise.toml (zcrew managed floor)"
-  if command -v mise >/dev/null 2>&1; then
-    mise trust "$target/.config/mise.toml" >/dev/null 2>&1 || true
-    echo "    .config/mise.toml (trusted)"
-  fi
   (
     cd "$target"
     env -u BX_INSIDE ./bin/bx init >/dev/null
@@ -662,6 +655,14 @@ cmd_rename() {
   local new="${2:-}"
   [[ -n "$old" && -n "$new" ]] || { echo "Usage: zcrew rename <old> <new>" >&2; exit 1; }
   logger "rename" "info" "entry old=$old new=$new"
+  if [[ "$old" == "main" ]]; then
+    echo "zcrew: cannot rename main alias" >&2
+    exit 1
+  fi
+  if [[ "$new" == "main" ]] && jq -e '(.panes // {}).main != null' "$REGISTRY_FILE" >/dev/null; then
+    echo "zcrew: main alias is taken" >&2
+    exit 1
+  fi
   local pane_id
   pane_id=$(jq -r --arg old "$old" '(.panes // {}) | .[$old].paneId // empty' "$REGISTRY_FILE")
   registry_write_jq '
@@ -687,62 +688,71 @@ cmd_rename() {
   echo "renamed: $old -> $new"
 }
 
-resolve_sender_name() {
+resolve_sender_name_readonly() {
   require_project
   ensure_registry_files
 
   local pane_id="${ZELLIJ_PANE_ID:-}"
   [[ -n "$pane_id" ]] || pane_id="0"
 
-  local sender_name
-  sender_name=$(jq -r --arg paneId "$pane_id" '
+  jq -r --arg paneId "$pane_id" '
     (.panes // {})
     | to_entries
     | map(select((.value.paneId // "") == $paneId))
     | sort_by(if (.key | test("^pane-[0-9]+$")) then 1 else 0 end)
     | .[0].key // empty
-  ' "$REGISTRY_FILE")
-  if [[ -n "$sender_name" ]]; then
-    printf '%s\n' "$sender_name"
+  ' "$REGISTRY_FILE"
+}
+
+claim_main_for_send() {
+  require_project
+  ensure_registry_files
+
+  if [[ -n "${BX_INSIDE:-}" ]]; then
+    resolve_sender_name_readonly
     return 0
   fi
 
-  local now
+  local pane_id="${ZELLIJ_PANE_ID:-}"
+  [[ -n "$pane_id" ]] || pane_id="0"
+
+  local now live_json
   now=$(date +%s)
+  live_json=$(live_pane_ids | jq -Rsc 'split("\n") | map(select(length>0))')
+
   registry_write_jq '
     .version = 1
     | .panes = (.panes // {})
-    | if (.panes | to_entries | any((.value.paneId // "") == $paneId)) then
-        .
+    | if ((.panes.main.paneId // "") as $mainPaneId | ($live | index($mainPaneId)) == null) then
+        ((.panes
+          | to_entries
+          | map(select((.value.paneId // "") == $paneId))
+          | sort_by(if (.key | test("^pane-[0-9]+$")) then 1 else 0 end)
+          | .[0].value) // {
+            paneId: $paneId,
+            sessionId: null,
+            agent: "unknown",
+            cwd: $cwd,
+            pid: ($pid | tonumber),
+            lastSeen: ($now | tonumber),
+            status: "alive"
+          }) as $entry
+        | .panes |= del(.["pane-" + $paneId])
+        | .panes.main = ($entry
+            | .paneId = $paneId
+            | .cwd = (.cwd // $cwd)
+            | .pid = (.pid // ($pid | tonumber))
+            | .lastSeen = ($now | tonumber)
+            | .status = "alive")
       else
-        .panes[(if (.panes.main == null) then "main" else ("pane-" + $paneId) end)] = {
-          paneId: $paneId,
-          sessionId: null,
-          agent: "unknown",
-          cwd: $cwd,
-          pid: ($pid | tonumber),
-          lastSeen: ($now | tonumber),
-          status: "alive"
-        }
+        .
       end
   ' \
     --arg paneId "$pane_id" \
     --arg cwd "$PWD" \
     --arg pid "$$" \
-    --arg now "$now"
-
-  sender_name=$(jq -r --arg paneId "$pane_id" '
-    (.panes // {})
-    | to_entries
-    | map(select((.value.paneId // "") == $paneId))
-    | sort_by(if (.key | test("^pane-[0-9]+$")) then 1 else 0 end)
-    | .[0].key // empty
-  ' "$REGISTRY_FILE")
-  [[ -n "$sender_name" ]] || {
-    echo "zcrew: failed to resolve sender name for paneId=$pane_id" >&2
-    exit 1
-  }
-  printf '%s\n' "$sender_name"
+    --arg now "$now" \
+    --argjson live "$live_json"
 }
 
 lookup_registered_pane_id() {
@@ -910,7 +920,6 @@ cmd_close() {
 cmd_send() {
   CURRENT_SUBCMD="send"
   require_project
-  require_zellij_session
   local do_compact=false
   if [[ "${1:-}" == "--compact" ]]; then
     do_compact=true
@@ -920,13 +929,28 @@ cmd_send() {
   shift || true
   [[ -n "$name" && $# -gt 0 ]] || { echo "Usage: zcrew send [--compact] <name> <message>" >&2; exit 1; }
   local message="$*"
+  require_zellij_session
   logger "send" "info" "entry name=$name msgLen=${#message}"
+
+  claim_main_for_send >/dev/null
+  local sender_name
+  sender_name="$(resolve_sender_name_readonly)"
 
   local pane_id
   pane_id=$(lookup_registered_pane_id "$name")
   if [[ -z "$pane_id" ]]; then
     logger "send" "error" "unknown name=$name"
     echo "zcrew: unknown pane name '$name'" >&2
+    exit 1
+  fi
+
+  if [[ -n "$sender_name" && "$sender_name" == "$name" ]]; then
+    echo "zcrew: cannot send to self" >&2
+    exit 1
+  fi
+
+  if [[ -n "${BX_INSIDE:-}" && "$name" != "main" ]]; then
+    echo "zcrew: worker panes cannot send directly to other workers; send results, questions, or blockers to main" >&2
     exit 1
   fi
 
@@ -949,13 +973,15 @@ cmd_send() {
     sleep 10
   fi
 
-  local sender_name
-  sender_name="$(resolve_sender_name)"
   local send_body
-  send_body="${message}"$'\n\n'"To report a result, finding, or question, INVOKE this command via your shell/bash tool — do NOT output it as your reply text:"$'\n'"  zcrew send ${sender_name} \"<your message>\""$'\n'"Skip bare acknowledgments."
+  if [[ -z "${BX_INSIDE:-}" ]]; then
+    send_body="${message}"$'\n\n'"To report a result, finding, blocker, or question, run this in your shell/bash tool. Do NOT write it as reply text:"$'\n\n'"  zcrew send main \"<your message>\""$'\n\n'"Communicate ONLY with main. Never send to other workers. Never send bare acknowledgments."
+  else
+    send_body="$message"
+  fi
 
   "$tell_bin" "$pane_id" "$send_body"
-  logger "send" "info" "sent name=$name paneId=$pane_id"
+  logger "send" "info" "sent name=$name paneId=$pane_id sender=${sender_name:-unknown} inside=${BX_INSIDE:-0}"
   echo "sent: $name ($pane_id)"
 }
 
