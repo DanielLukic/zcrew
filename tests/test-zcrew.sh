@@ -3,7 +3,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-ZCREW_BIN="$REPO_ROOT/bin/zcrew"
+ZCREW_BIN="$REPO_ROOT/.zcrew/bin/zcrew"
 TMP_BASE="${TMPDIR:-/tmp}"
 TEST_ROOT="$TMP_BASE/zcrew-tests-$$"
 
@@ -66,7 +66,7 @@ run_test() {
 
 test_0_no_hardcoded_home_paths_in_source_files() {
   local needle='/home'"'/dl"
-  ! rg -n "$needle" "$REPO_ROOT/bin" "$REPO_ROOT/lib" "$REPO_ROOT/tests" >/dev/null
+  ! rg -n "$needle" "$REPO_ROOT/.zcrew/bin" "$REPO_ROOT/.zcrew/lib" "$REPO_ROOT/tests" >/dev/null
 }
 
 make_mock_zellij() {
@@ -231,7 +231,7 @@ prepare_send_test_tools() {
   local list_output=""
   local pane_id
 
-  make_mock_tell "$project_dir/lib/zcrew/tell" "$args_file"
+  make_mock_tell "$project_dir/.zcrew/lib/tell" "$args_file"
   mkdir -p "$bindir"
   for pane_id in ${live_pane_ids//,/ }; do
     list_output+="terminal_${pane_id}"$'\n'
@@ -261,7 +261,7 @@ run_codex_launcher() {
   (
     cd "$project_dir" || exit 1
     HOME="$home_dir" PATH="$mockbin:$PATH" MOCK_BX_ARGS_FILE="$args_file" \
-      "$REPO_ROOT/lib/zcrew/launchers/codex.sh" >/dev/null 2>&1
+      "$REPO_ROOT/.zcrew/lib/launchers/codex.sh" >/dev/null 2>&1
   )
 }
 
@@ -278,6 +278,32 @@ plant_host_claude_auth() {
   mkdir -p "$home_dir/.claude"
   printf '%s\n' "$json_content" > "$home_dir/.claude.json"
   printf '%s\n' "$creds_content" > "$home_dir/.claude/.credentials.json"
+}
+
+seed_stale_zcrew_layout() {
+  local target="$1"
+  mkdir -p "$target/bin" "$target/lib/zcrew/launchers"
+  cp "$REPO_ROOT/.zcrew/bin/zcrew" "$target/bin/zcrew"
+  cp "$REPO_ROOT/.zcrew/bin/bx" "$target/bin/bx"
+  cp "$REPO_ROOT/.zcrew/bin/ix" "$target/bin/ix"
+  cp "$REPO_ROOT/.zcrew/lib/tell" "$target/lib/zcrew/tell"
+  cp "$REPO_ROOT/.zcrew/lib/launchers/claude.sh" "$target/lib/zcrew/launchers/claude.sh"
+  cp "$REPO_ROOT/.zcrew/lib/launchers/codex.sh" "$target/lib/zcrew/launchers/codex.sh"
+  cp "$REPO_ROOT/.zcrew/lib/launchers/pi.sh" "$target/lib/zcrew/launchers/pi.sh"
+  chmod +x "$target/bin/zcrew" "$target/bin/bx" "$target/bin/ix" \
+    "$target/lib/zcrew/tell" "$target/lib/zcrew/launchers/claude.sh" \
+    "$target/lib/zcrew/launchers/codex.sh" "$target/lib/zcrew/launchers/pi.sh"
+}
+
+assert_managed_zcrew_layout() {
+  local target="$1"
+  [[ -x "$target/.zcrew/bin/zcrew" ]] || return 1
+  [[ -x "$target/.zcrew/bin/bx" ]] || return 1
+  [[ -x "$target/.zcrew/bin/ix" ]] || return 1
+  [[ -x "$target/.zcrew/lib/tell" ]] || return 1
+  [[ -x "$target/.zcrew/lib/launchers/claude.sh" ]] || return 1
+  [[ -x "$target/.zcrew/lib/launchers/codex.sh" ]] || return 1
+  [[ -x "$target/.zcrew/lib/launchers/pi.sh" ]]
 }
 
 test_1_init_creates_registry() {
@@ -370,7 +396,8 @@ test_7_placeholder_promotion_no_duplicate() {
 
   zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
   mkdir -p "$d/bin"
-  ln -sf "$ZCREW_BIN" "$d/bin/zcrew"
+  mkdir -p "$d/.zcrew/bin"
+  ln -sf "$ZCREW_BIN" "$d/.zcrew/bin/zcrew"
   zcrew_cmd "$d" register pane-99 --paneId 99 --sessionId s99 --agent claude --cwd "$d" --pid 99 --status alive >/dev/null 2>&1 || return 1
 
   make_mock_zellij "$mockbin"
@@ -393,7 +420,7 @@ test_9_send_calls_tell_with_expected_args() {
 
   zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
   zcrew_cmd "$d" register buddy --paneId 123 --sessionId s --agent claude --cwd "$d" --pid 1 --status alive >/dev/null 2>&1 || return 1
-  make_mock_tell "$d/lib/zcrew/tell" "$args_file"
+  make_mock_tell "$d/.zcrew/lib/tell" "$args_file"
   mkdir -p "$mockbin"
 
   # Mock zellij so require_zellij_session and liveness check pass
@@ -530,9 +557,9 @@ test_11b_spawn_duplicate_name_fails_before_new_pane() {
 
   zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
   zcrew_cmd "$d" register buddy --paneId 123 --sessionId s1 --agent claude --cwd "$d" --pid 1 --status alive >/dev/null 2>&1 || return 1
-  mkdir -p "$d/lib/zcrew/launchers"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$d/lib/zcrew/launchers/claude.sh"
-  chmod +x "$d/lib/zcrew/launchers/claude.sh"
+  mkdir -p "$d/.zcrew/lib/launchers"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$d/.zcrew/lib/launchers/claude.sh"
+  chmod +x "$d/.zcrew/lib/launchers/claude.sh"
   make_mock_zellij_spawn "$mockbin" "$args_file"
 
   if out="$(
@@ -557,9 +584,9 @@ test_11c_spawn_allows_name_after_pruning_stale_entry() {
 
   zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
   mkdir -p "$d/.bx"
-  mkdir -p "$d/lib/zcrew/launchers"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$d/lib/zcrew/launchers/claude.sh"
-  chmod +x "$d/lib/zcrew/launchers/claude.sh"
+  mkdir -p "$d/.zcrew/lib/launchers"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$d/.zcrew/lib/launchers/claude.sh"
+  chmod +x "$d/.zcrew/lib/launchers/claude.sh"
   zcrew_cmd "$d" register buddy --paneId 999 --sessionId s1 --agent claude --cwd "$d" --pid 1 --status alive >/dev/null 2>&1 || return 1
   make_mock_zellij_spawn "$mockbin" "$args_file"
 
@@ -583,9 +610,9 @@ test_11d_spawn_fresh_name_succeeds() {
 
   zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
   mkdir -p "$d/.bx"
-  mkdir -p "$d/lib/zcrew/launchers"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$d/lib/zcrew/launchers/claude.sh"
-  chmod +x "$d/lib/zcrew/launchers/claude.sh"
+  mkdir -p "$d/.zcrew/lib/launchers"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$d/.zcrew/lib/launchers/claude.sh"
+  chmod +x "$d/.zcrew/lib/launchers/claude.sh"
   make_mock_zellij_spawn "$mockbin" "$args_file"
 
   (
@@ -606,9 +633,9 @@ test_11e_spawn_builtin_agent_uses_launcher_script() {
   args_file="$d/zellij-args.txt"
 
   zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
-  mkdir -p "$d/.bx" "$d/lib/zcrew/launchers"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$d/lib/zcrew/launchers/codex.sh"
-  chmod +x "$d/lib/zcrew/launchers/codex.sh"
+  mkdir -p "$d/.bx" "$d/.zcrew/lib/launchers"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$d/.zcrew/lib/launchers/codex.sh"
+  chmod +x "$d/.zcrew/lib/launchers/codex.sh"
   make_mock_zellij_spawn "$mockbin" "$args_file"
 
   out="$(
@@ -619,7 +646,7 @@ test_11e_spawn_builtin_agent_uses_launcher_script() {
   )" || return 1
 
   printf '%s\n' "$out" | grep -Fq 'spawned: reviewer (codex) pane=556' || return 1
-  grep -Fq "$d/lib/zcrew/launchers/codex.sh" "$args_file" || return 1
+  grep -Fq "$d/.zcrew/lib/launchers/codex.sh" "$args_file" || return 1
   ! grep -Fq 'bx run codex' "$args_file" || return 1
   jq -e '.panes.reviewer.agent == "codex" and .panes.reviewer.paneId == "556"' "$d/.zcrew/registry.json" >/dev/null
 }
@@ -633,9 +660,9 @@ test_11f_spawn_seeds_missing_managed_mounts() {
 
   zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
   rm -f "$d/.bx/mounts"
-  mkdir -p "$d/.bx" "$d/lib/zcrew/launchers"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$d/lib/zcrew/launchers/claude.sh"
-  chmod +x "$d/lib/zcrew/launchers/claude.sh"
+  mkdir -p "$d/.bx" "$d/.zcrew/lib/launchers"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$d/.zcrew/lib/launchers/claude.sh"
+  chmod +x "$d/.zcrew/lib/launchers/claude.sh"
   make_mock_zellij_spawn "$mockbin" "$args_file"
 
   out="$(
@@ -660,13 +687,13 @@ test_11g_spawn_repairs_managed_mounts_preserving_custom_lines() {
   custom_dst="/opt/custom"
 
   zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
-  mkdir -p "$d/.bx" "$d/lib/zcrew/launchers" "$custom_src"
+  mkdir -p "$d/.bx" "$d/.zcrew/lib/launchers" "$custom_src"
   cat > "$d/.bx/mounts" <<EOF
 $custom_src $custom_dst ro
 /old/zellij /run/user/$(id -u)/zellij rw
 EOF
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$d/lib/zcrew/launchers/claude.sh"
-  chmod +x "$d/lib/zcrew/launchers/claude.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$d/.zcrew/lib/launchers/claude.sh"
+  chmod +x "$d/.zcrew/lib/launchers/claude.sh"
   make_mock_zellij_spawn "$mockbin" "$args_file"
 
   out="$(
@@ -843,7 +870,7 @@ test_18b_install_writes_managed_mise_floor() {
 node = "lts"
 
 [env]
-_.path = ["bin"]
+_.path = [".zcrew/bin"]
 EOF
   cmp -s "$d/expected-mise.toml" "$d/.config/mise.toml"
 }
@@ -870,7 +897,7 @@ EOF
   grep -Fxq 'node = "lts"' "$real_dir/.config/mise.toml" || return 1
   grep -Fxq '[env]' "$real_dir/.config/mise.toml" || return 1
   ! grep -Fq 'ZCREW_PROJECT_DIR' "$real_dir/.config/mise.toml" || return 1
-  grep -Fxq '_.path = ["bin"]' "$real_dir/.config/mise.toml"
+  grep -Fxq '_.path = [".zcrew/bin"]' "$real_dir/.config/mise.toml"
 }
 
 test_18d_install_does_not_create_envrc() {
@@ -1172,9 +1199,9 @@ test_32b_install_writes_internal_tell_binary() {
 
   zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
 
-  [[ -f "$d/lib/zcrew/tell" ]] || return 1
-  [[ -x "$d/lib/zcrew/tell" ]] || return 1
-  cmp -s "$REPO_ROOT/lib/zcrew/tell" "$d/lib/zcrew/tell"
+  [[ -f "$d/.zcrew/lib/tell" ]] || return 1
+  [[ -x "$d/.zcrew/lib/tell" ]] || return 1
+  cmp -s "$REPO_ROOT/.zcrew/lib/tell" "$d/.zcrew/lib/tell"
 }
 
 test_33_install_does_not_write_host_pi_dirs() {
@@ -1575,7 +1602,7 @@ test_43_codex_launcher_forwards_model_to_bx_run() {
     cd "$d" || exit 1
     HOME="$home_dir" PATH="$mockbin:$PATH" MOCK_BX_ARGS_FILE="$args_file" \
       ZCREW_MODEL="gpt-5.4" \
-      "$REPO_ROOT/lib/zcrew/launchers/codex.sh" >/dev/null 2>&1
+      "$REPO_ROOT/.zcrew/lib/launchers/codex.sh" >/dev/null 2>&1
   ) || return 1
 
   grep -Fxq 'run codex -a never -s danger-full-access --model gpt-5.4' "$args_file"
@@ -1607,15 +1634,16 @@ test_45_install_self_install_no_crash() {
   d="$(new_test_dir 45)"
   fixture="$d/zcrew-fixture"
   cp -r "$REPO_ROOT" "$fixture" || return 1
-  rm -rf "$fixture/.bx" "$fixture/.zcrew"
+  rm -rf "$fixture/.bx"
+  find "$fixture/.zcrew" -mindepth 1 -maxdepth 1 ! -name bin ! -name lib -exec rm -rf {} + || return 1
   out=$(
     cd "$fixture" || exit 1
-    ZCREW_AUTO_SYNC=0 "$fixture/bin/zcrew" install "$fixture" 2>&1
+    ZCREW_AUTO_SYNC=0 "$fixture/.zcrew/bin/zcrew" install "$fixture" 2>&1
   ) || { printf '%s\n' "$out" >&2; return 1; }
   printf '%s\n' "$out" | grep -q "source == target" || return 1
   printf '%s\n' "$out" | grep -qi "cp: .*same file" && return 1
   [[ -d "$fixture/.bx" ]] || return 1
-  [[ -d "$fixture/.zcrew" ]] || return 1
+  [[ -x "$fixture/.zcrew/bin/zcrew" ]] || return 1
   return 0
 }
 
@@ -1800,6 +1828,98 @@ test_54_send_claims_main_after_main_disappears() {
   grep -Fq 'zcrew send main "<your message>"' "$args_file"
 }
 
+test_55_install_migrates_stale_layout_when_single_old_file_exists() {
+  local d out
+  d="$(new_test_dir 55)"
+  mkdir -p "$d/bin"
+  cp "$REPO_ROOT/.zcrew/bin/zcrew" "$d/bin/zcrew" || return 1
+  chmod +x "$d/bin/zcrew" || return 1
+
+  out="$(zcrew_cmd "$TEST_ROOT" install "$d" 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
+
+  assert_managed_zcrew_layout "$d" || return 1
+  [[ ! -e "$d/bin/zcrew" ]] || return 1
+  printf '%s\n' "$out" | grep -Fq 'close all worker panes before relying on the new layout'
+}
+
+test_56_install_fresh_layout_writes_new_paths() {
+  local d
+  d="$(new_test_dir 56)"
+  mkdir -p "$d"
+
+  zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
+
+  assert_managed_zcrew_layout "$d" || return 1
+  [[ ! -e "$d/bin/zcrew" ]] || return 1
+  [[ ! -e "$d/lib/zcrew/tell" ]]
+}
+
+test_57_install_is_idempotent_on_migrated_target() {
+  local d before after
+  d="$(new_test_dir 57)"
+  mkdir -p "$d"
+
+  zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
+  before="$(find "$d/.zcrew/bin" "$d/.zcrew/lib" -type f -printf '%P %s\n' | sort)" || return 1
+  zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
+  after="$(find "$d/.zcrew/bin" "$d/.zcrew/lib" -type f -printf '%P %s\n' | sort)" || return 1
+
+  [[ "$before" == "$after" ]]
+}
+
+test_58_install_migration_preserves_unknown_old_lib_files_with_warning() {
+  local d out
+  d="$(new_test_dir 58)"
+  seed_stale_zcrew_layout "$d"
+  mkdir -p "$d/lib/zcrew"
+  printf '%s\n' 'keep me' > "$d/lib/zcrew/custom.sh"
+
+  out="$(zcrew_cmd "$TEST_ROOT" install "$d" 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
+
+  assert_managed_zcrew_layout "$d" || return 1
+  [[ -f "$d/lib/zcrew/custom.sh" ]] || return 1
+  printf '%s\n' "$out" | grep -Fq 'unexpected files under legacy lib/zcrew preserved:'
+}
+
+test_59_install_migration_recovers_from_partial_copy() {
+  local d
+  d="$(new_test_dir 59)"
+  seed_stale_zcrew_layout "$d"
+  mkdir -p "$d/.zcrew/bin" "$d/.zcrew/lib"
+  cp "$REPO_ROOT/.zcrew/bin/zcrew" "$d/.zcrew/bin/zcrew" || return 1
+
+  zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
+
+  assert_managed_zcrew_layout "$d"
+}
+
+test_60_install_migration_preserves_user_owned_bin_and_lib_files() {
+  local d
+  d="$(new_test_dir 60)"
+  seed_stale_zcrew_layout "$d"
+  mkdir -p "$d/bin" "$d/lib"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$d/bin/foo.sh"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$d/lib/foo.sh"
+  chmod +x "$d/bin/foo.sh" "$d/lib/foo.sh"
+
+  zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
+
+  [[ -x "$d/bin/foo.sh" ]] || return 1
+  [[ -x "$d/lib/foo.sh" ]] || return 1
+  [[ ! -e "$d/bin/zcrew" ]]
+}
+
+test_61_install_migration_keeps_mise_path_functional() {
+  local d out
+  d="$(new_test_dir 61)"
+  seed_stale_zcrew_layout "$d"
+
+  zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
+  out="$(cd "$d" && ZCREW_AUTO_SYNC=0 PATH="/usr/bin:/bin" bash -lc 'source .config/mise.toml >/dev/null 2>&1 || true; ./.zcrew/bin/zcrew init 2>&1')" || true
+
+  [[ -f "$d/.zcrew/registry.json" ]]
+}
+
 main() {
   mkdir -p "$TEST_ROOT"
 
@@ -1852,7 +1972,7 @@ main() {
   run_test "30) install preserves managed gitignore lines in any order" test_30_install_preserves_managed_gitignore_lines_in_any_order
   run_test "31) install writes .pi zcrew and z* skills" test_31_install_writes_pi_skills
   run_test "32) second install overwrites .pi skills with latest content" test_32_second_install_overwrites_pi_skills_with_latest_content
-  run_test "32b) install writes lib/zcrew/tell" test_32b_install_writes_internal_tell_binary
+  run_test "32b) install writes .zcrew/lib/tell" test_32b_install_writes_internal_tell_binary
   run_test "33) install does not write host ~/.pi or ~/.agents" test_33_install_does_not_write_host_pi_dirs
   run_test "34) installed .pi skills have valid required frontmatter" test_34_pi_skill_frontmatter_sanity
   run_test "34b) install writes canonical .agents zcrew skill plus symlinked codex/pi views" test_34b_install_writes_cross_tool_zcrew_skill_layout
@@ -1883,6 +2003,13 @@ main() {
   run_test "52) send banner is host-only with exact literal" test_52_send_banner_host_only
   run_test "53) rename guards main alias" test_53_rename_main_alias_guards
   run_test "54) send reclaims main after host restart" test_54_send_claims_main_after_main_disappears
+  run_test "55) stale install migrates when a single legacy file exists" test_55_install_migrates_stale_layout_when_single_old_file_exists
+  run_test "56) fresh install writes only new .zcrew-owned paths" test_56_install_fresh_layout_writes_new_paths
+  run_test "57) install is idempotent on migrated targets" test_57_install_is_idempotent_on_migrated_target
+  run_test "58) migration preserves unknown legacy lib/zcrew files with warning" test_58_install_migration_preserves_unknown_old_lib_files_with_warning
+  run_test "59) migration recovers from partial new-layout copy" test_59_install_migration_recovers_from_partial_copy
+  run_test "60) migration preserves user-owned bin and lib files" test_60_install_migration_preserves_user_owned_bin_and_lib_files
+  run_test "61) migrated .zcrew/bin zcrew remains functional" test_61_install_migration_keeps_mise_path_functional
 
   echo ""
   echo "Total: $PASS_COUNT PASS, $FAIL_COUNT FAIL"
