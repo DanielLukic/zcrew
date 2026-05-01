@@ -1989,6 +1989,118 @@ test_61_install_migration_keeps_mise_path_functional() {
   [[ -f "$d/.zcrew/registry.json" ]]
 }
 
+test_62_install_keep_creates_bin_symlinks() {
+  local d
+  d="$(new_test_dir 62)"
+  mkdir -p "$d"
+
+  zcrew_cmd "$TEST_ROOT" install --keep "$d" >/dev/null 2>&1 || return 1
+
+  assert_managed_zcrew_layout "$d" || return 1
+  [[ -L "$d/bin/zcrew" && "$(readlink "$d/bin/zcrew")" == '../.zcrew/bin/zcrew' ]] || return 1
+  [[ -L "$d/bin/bx" && "$(readlink "$d/bin/bx")" == '../.zcrew/bin/bx' ]] || return 1
+  [[ -L "$d/bin/ix" && "$(readlink "$d/bin/ix")" == '../.zcrew/bin/ix' ]]
+}
+
+test_63_install_keep_creates_lib_symlinks() {
+  local d
+  d="$(new_test_dir 63)"
+  mkdir -p "$d"
+
+  zcrew_cmd "$TEST_ROOT" install "$d" --keep >/dev/null 2>&1 || return 1
+
+  [[ -L "$d/lib/zcrew/tell" && "$(readlink "$d/lib/zcrew/tell")" == '../../.zcrew/lib/tell' ]] || return 1
+  [[ -L "$d/lib/zcrew/launchers/claude.sh" && "$(readlink "$d/lib/zcrew/launchers/claude.sh")" == '../../../.zcrew/lib/launchers/claude.sh' ]] || return 1
+  [[ -L "$d/lib/zcrew/launchers/codex.sh" && "$(readlink "$d/lib/zcrew/launchers/codex.sh")" == '../../../.zcrew/lib/launchers/codex.sh' ]] || return 1
+  [[ -L "$d/lib/zcrew/launchers/pi.sh" && "$(readlink "$d/lib/zcrew/launchers/pi.sh")" == '../../../.zcrew/lib/launchers/pi.sh' ]]
+}
+
+test_64_install_keep_is_idempotent() {
+  local d before after
+  d="$(new_test_dir 64)"
+  mkdir -p "$d"
+
+  zcrew_cmd "$TEST_ROOT" install --keep "$d" >/dev/null 2>&1 || return 1
+  before="$(find "$d/bin" "$d/lib/zcrew" -type l -printf '%P -> %l\n' | sort)" || return 1
+  zcrew_cmd "$TEST_ROOT" install "$d" --keep >/dev/null 2>&1 || return 1
+  after="$(find "$d/bin" "$d/lib/zcrew" -type l -printf '%P -> %l\n' | sort)" || return 1
+
+  [[ "$before" == "$after" ]]
+}
+
+test_65_install_without_keep_removes_owned_keep_symlinks() {
+  local d
+  d="$(new_test_dir 65)"
+  mkdir -p "$d"
+
+  zcrew_cmd "$TEST_ROOT" install --keep "$d" >/dev/null 2>&1 || return 1
+  zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
+
+  assert_managed_zcrew_layout "$d" || return 1
+  [[ ! -e "$d/bin/zcrew" ]] || return 1
+  [[ ! -e "$d/lib/zcrew/tell" ]] || return 1
+  [[ ! -d "$d/bin" ]] || return 1
+  [[ ! -d "$d/lib/zcrew" ]]
+}
+
+test_66_install_keep_warns_and_skips_real_file_collision() {
+  local d out content_before content_after
+  d="$(new_test_dir 66)"
+  mkdir -p "$d/bin"
+  printf '%s\n' 'user file' > "$d/bin/zcrew"
+  content_before="$(cat "$d/bin/zcrew")"
+
+  out="$(zcrew_cmd "$TEST_ROOT" install --keep "$d" 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
+  content_after="$(cat "$d/bin/zcrew")"
+  [[ "$content_before" == "$content_after" ]] || return 1
+  [[ ! -L "$d/bin/zcrew" ]] || return 1
+  printf '%s\n' "$out" | grep -Fq 'warning: keeping existing non-symlink at bin/zcrew' || return 1
+
+  out="$(zcrew_cmd "$TEST_ROOT" install "$d" 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
+  [[ -f "$d/bin/zcrew" && ! -L "$d/bin/zcrew" ]] || return 1
+  printf '%s\n' "$out" | grep -Fq 'warning: keeping existing non-symlink at bin/zcrew'
+}
+
+test_67_install_without_keep_leaves_unrelated_symlink_alone() {
+  local d out
+  d="$(new_test_dir 67)"
+  mkdir -p "$d/bin" "$d/elsewhere"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$d/elsewhere/zcrew"
+  chmod +x "$d/elsewhere/zcrew"
+  ln -s ../elsewhere/zcrew "$d/bin/zcrew"
+
+  out="$(zcrew_cmd "$TEST_ROOT" install "$d" 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
+
+  [[ -L "$d/bin/zcrew" && "$(readlink "$d/bin/zcrew")" == '../elsewhere/zcrew' ]] || return 1
+  printf '%s\n' "$out" | grep -Fq 'warning: leaving existing non-zcrew symlink at bin/zcrew'
+}
+
+test_68_install_keep_after_migration_creates_symlinks() {
+  local d
+  d="$(new_test_dir 68)"
+  seed_stale_zcrew_layout "$d"
+
+  zcrew_cmd "$TEST_ROOT" install --keep "$d" >/dev/null 2>&1 || return 1
+
+  assert_managed_zcrew_layout "$d" || return 1
+  [[ -L "$d/bin/zcrew" && "$(readlink "$d/bin/zcrew")" == '../.zcrew/bin/zcrew' ]] || return 1
+  [[ -L "$d/lib/zcrew/tell" && "$(readlink "$d/lib/zcrew/tell")" == '../../.zcrew/lib/tell' ]]
+}
+
+test_69_install_keep_ignored_for_source_equals_target() {
+  local d fixture out
+  d="$(new_test_dir 69)"
+  fixture="$d/zcrew-fixture"
+  cp -r "$REPO_ROOT" "$fixture" || return 1
+  rm -rf "$fixture/.bx"
+  find "$fixture/.zcrew" -mindepth 1 -maxdepth 1 ! -name bin ! -name lib -exec rm -rf {} + || return 1
+
+  out="$(cd "$fixture" && ZCREW_AUTO_SYNC=0 "$fixture/.zcrew/bin/zcrew" install --keep "$fixture" 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
+
+  [[ ! -e "$fixture/bin/zcrew" ]] || return 1
+  printf '%s\n' "$out" | grep -Fq 'source == target'
+}
+
 main() {
   mkdir -p "$TEST_ROOT"
 
@@ -2082,6 +2194,14 @@ main() {
   run_test "59) migration recovers from partial new-layout copy" test_59_install_migration_recovers_from_partial_copy
   run_test "60) migration preserves user-owned bin and lib files" test_60_install_migration_preserves_user_owned_bin_and_lib_files
   run_test "61) migrated .zcrew/bin zcrew remains functional" test_61_install_migration_keeps_mise_path_functional
+  run_test "62) install --keep creates transitional bin symlinks" test_62_install_keep_creates_bin_symlinks
+  run_test "63) install --keep creates transitional lib symlinks" test_63_install_keep_creates_lib_symlinks
+  run_test "64) install --keep is idempotent" test_64_install_keep_is_idempotent
+  run_test "65) install without --keep removes owned transitional symlinks" test_65_install_without_keep_removes_owned_keep_symlinks
+  run_test "66) install --keep warns and skips real file collisions" test_66_install_keep_warns_and_skips_real_file_collision
+  run_test "67) install without --keep leaves unrelated symlink alone" test_67_install_without_keep_leaves_unrelated_symlink_alone
+  run_test "68) stale migration + --keep creates transitional symlinks after migration" test_68_install_keep_after_migration_creates_symlinks
+  run_test "69) source==target ignores --keep" test_69_install_keep_ignored_for_source_equals_target
 
   echo ""
   echo "Total: $PASS_COUNT PASS, $FAIL_COUNT FAIL"
