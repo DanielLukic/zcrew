@@ -11,6 +11,18 @@ PASS_COUNT=0
 FAIL_COUNT=0
 
 cleanup() {
+  local pid_file pid
+  shopt -s nullglob
+  for pid_file in "$TEST_ROOT"/**/*.pid "$TEST_ROOT"/*.pid; do
+    [[ -f "$pid_file" ]] || continue
+    pid="$(tr -dc '0-9' < "$pid_file")"
+    [[ -n "$pid" ]] || continue
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  shopt -u nullglob
+  jobs -pr | xargs -r kill 2>/dev/null || true
+  wait 2>/dev/null || true
   rm -rf "$TEST_ROOT"
 }
 trap cleanup EXIT
@@ -28,7 +40,7 @@ zcrew_cmd() {
   shift
   (
     cd "$d" || exit 1
-    ZCREW_AUTO_SYNC=0 "$ZCREW_BIN" "$@"
+    env -u BX_INSIDE ZCREW_AUTO_SYNC=0 "$ZCREW_BIN" "$@"
   )
 }
 
@@ -214,18 +226,23 @@ prepare_send_test_tools() {
   local project_dir="$1"
   local bindir="$2"
   local args_file="$3"
-  local live_pane_id="${4:-123}"
+  local live_pane_ids="${4:-123}"
   local session_name="${5:-test-session}"
+  local list_output=""
+  local pane_id
 
   make_mock_tell "$project_dir/lib/zcrew/tell" "$args_file"
   mkdir -p "$bindir"
+  for pane_id in ${live_pane_ids//,/ }; do
+    list_output+="terminal_${pane_id}"$'\n'
+  done
   cat > "$bindir/zellij" <<MOCK_ZELLIJ
 #!/bin/bash
 case "\${1:-}" in
   list-sessions) echo "$session_name" ;;
   action)
     case "\${2:-}" in
-      list-panes) echo "terminal_$live_pane_id" ;;
+      list-panes) printf '%s' '$list_output' ;;
       *) exit 0 ;;
     esac
     ;;
@@ -246,6 +263,11 @@ run_codex_launcher() {
     HOME="$home_dir" PATH="$mockbin:$PATH" MOCK_BX_ARGS_FILE="$args_file" \
       "$REPO_ROOT/lib/zcrew/launchers/codex.sh" >/dev/null 2>&1
   )
+}
+
+source_zcrew_lib() {
+  local lib_copy="$1"
+  sed '$d' "$ZCREW_BIN" > "$lib_copy"
 }
 
 plant_host_claude_auth() {
@@ -392,7 +414,7 @@ MOCK_ZELLIJ
 
   (
     cd "$d" || exit 1
-    PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" \
+    env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" \
       ZELLIJ_SESSION_NAME="test-session" \
       ZELLIJ_PANE_ID="0" \
       "$ZCREW_BIN" send buddy "hello world" >/dev/null 2>&1
@@ -401,7 +423,7 @@ MOCK_ZELLIJ
   [[ -f "$args_file" ]] || return 1
   sent="$(sed -n '1p' "$args_file")"
   [[ "$sent" == 123\ hello\ world* ]] || return 1
-  grep -q 'To report a result, finding, or question' "$args_file"
+  grep -q 'To report a result, finding, blocker, or question' "$args_file"
 }
 
 test_9b_send_compact_calls_tell_twice_with_delay() {
@@ -418,7 +440,7 @@ test_9b_send_compact_calls_tell_twice_with_delay() {
 
   (
     cd "$d" || exit 1
-    PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" MOCK_SLEEP_ARGS_FILE="$sleep_file" \
+    env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" MOCK_SLEEP_ARGS_FILE="$sleep_file" \
       ZELLIJ_SESSION_NAME="test-session" \
       ZELLIJ_PANE_ID="0" \
       "$ZCREW_BIN" send --compact buddy "hello compact" >/dev/null 2>&1
@@ -446,7 +468,7 @@ test_9c_send_without_compact_calls_tell_once() {
 
   (
     cd "$d" || exit 1
-    PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" \
+    env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" \
       ZELLIJ_SESSION_NAME="test-session" \
       ZELLIJ_PANE_ID="0" \
       "$ZCREW_BIN" send buddy "hello once" >/dev/null 2>&1
@@ -681,7 +703,7 @@ test_12b_send_stale_unknown_agent_preserves_agent_name_in_suggestion() {
 
   if out="$(
     cd "$d" || exit 1
-    ZCREW_AUTO_SYNC=0 PATH="$mockbin:$PATH" ZELLIJ_SESSION_NAME='test-session' \
+    env -u BX_INSIDE ZCREW_AUTO_SYNC=0 PATH="$mockbin:$PATH" ZELLIJ_SESSION_NAME='test-session' \
       "$ZCREW_BIN" send helper "hello" 2>&1
   )"; then
     return 1
@@ -1329,7 +1351,7 @@ test_35_send_claude_target_refreshes_auth_files() {
 
   (
     cd "$d" || exit 1
-    HOME="$host_home" PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" \
+    env -u BX_INSIDE HOME="$host_home" PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" \
       ZELLIJ_SESSION_NAME="test-session" ZELLIJ_PANE_ID="0" \
       "$ZCREW_BIN" send buddy "hello world" >/dev/null 2>&1
   ) || return 1
@@ -1365,7 +1387,7 @@ test_36_send_codex_target_skips_claude_auth_refresh() {
 
   (
     cd "$d" || exit 1
-    HOME="$host_home" PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" \
+    env -u BX_INSIDE HOME="$host_home" PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" \
       ZELLIJ_SESSION_NAME="test-session" ZELLIJ_PANE_ID="0" \
       "$ZCREW_BIN" send buddy "hello world" >/dev/null 2>&1
   ) || return 1
@@ -1400,7 +1422,7 @@ test_37_send_unknown_target_skips_claude_auth_refresh() {
 
   (
     cd "$d" || exit 1
-    HOME="$host_home" PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" \
+    env -u BX_INSIDE HOME="$host_home" PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" \
       ZELLIJ_SESSION_NAME="test-session" ZELLIJ_PANE_ID="0" \
       "$ZCREW_BIN" send buddy "hello world" >/dev/null 2>&1
   ) || return 1
@@ -1429,7 +1451,7 @@ test_38_send_missing_host_claude_json_generates_minimal_target_state() {
 
   (
     cd "$d" || exit 1
-    HOME="$host_home" PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" \
+    env -u BX_INSIDE HOME="$host_home" PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" \
       ZELLIJ_SESSION_NAME="test-session" ZELLIJ_PANE_ID="0" \
       "$ZCREW_BIN" send buddy "hello world" >/dev/null 2>&1
   ) || return 1
@@ -1456,7 +1478,7 @@ test_39_send_missing_host_credentials_soft_fails() {
 
   (
     cd "$d" || exit 1
-    HOME="$host_home" PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" \
+    env -u BX_INSIDE HOME="$host_home" PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" \
       ZELLIJ_SESSION_NAME="test-session" ZELLIJ_PANE_ID="0" \
       "$ZCREW_BIN" send buddy "hello world" >/dev/null 2>&1
   ) || return 1
@@ -1481,7 +1503,7 @@ test_40_send_without_target_bx_home_soft_fails() {
 
   (
     cd "$d" || exit 1
-    HOME="$host_home" PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" \
+    env -u BX_INSIDE HOME="$host_home" PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" \
       ZELLIJ_SESSION_NAME="test-session" ZELLIJ_PANE_ID="0" \
       "$ZCREW_BIN" send buddy "hello world" >/dev/null 2>&1
   ) || return 1
@@ -1507,7 +1529,7 @@ test_41_send_claude_refresh_leaves_no_tmp_files() {
 
   (
     cd "$d" || exit 1
-    HOME="$host_home" PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" \
+    env -u BX_INSIDE HOME="$host_home" PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" \
       ZELLIJ_SESSION_NAME="test-session" ZELLIJ_PANE_ID="0" \
       "$ZCREW_BIN" send buddy "hello world" >/dev/null 2>&1
   ) || return 1
@@ -1592,6 +1614,187 @@ test_45_install_self_install_no_crash() {
   return 0
 }
 
+test_46_resolve_sender_name_readonly_is_pure() {
+  local d lib_copy before after mapped unmapped
+  d="$(new_test_dir 46)"
+  lib_copy="$d/zcrew-lib.sh"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register alpha --paneId 42 --sessionId s --agent claude --cwd "$d" --pid 1 --status alive >/dev/null 2>&1 || return 1
+  before="$(sha256sum "$d/.zcrew/registry.json")" || return 1
+  source_zcrew_lib "$lib_copy"
+
+  mapped=$(
+    cd "$d" || exit 1
+    env -u BX_INSIDE ZCREW_AUTO_SYNC=0 ZELLIJ_PANE_ID=42 bash -c 'set -euo pipefail; source "$1"; resolve_sender_name_readonly' bash "$lib_copy"
+  ) || return 1
+  unmapped=$(
+    cd "$d" || exit 1
+    env -u BX_INSIDE ZCREW_AUTO_SYNC=0 ZELLIJ_PANE_ID=99 bash -c 'set -euo pipefail; source "$1"; resolve_sender_name_readonly' bash "$lib_copy"
+  ) || return 1
+  after="$(sha256sum "$d/.zcrew/registry.json")" || return 1
+
+  [[ "$mapped" == "alpha" ]] || return 1
+  [[ -z "$unmapped" ]] || return 1
+  [[ "$before" == "$after" ]]
+}
+
+test_47_claim_main_for_send_promotes_host_when_main_absent() {
+  local d lib_copy
+  d="$(new_test_dir 47)"
+  lib_copy="$d/zcrew-lib.sh"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register helper --paneId 123 --sessionId s --agent claude --cwd "$d" --pid 1 --status alive >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register pane-99 --paneId 99 --sessionId s99 --agent unknown --cwd "$d" --pid 99 --status alive >/dev/null 2>&1 || return 1
+  prepare_send_test_tools "$d" "$d/mock-bin" "$d/tell-args.txt" "99,123"
+  source_zcrew_lib "$lib_copy"
+
+  (
+    cd "$d" || exit 1
+    env -u BX_INSIDE ZCREW_AUTO_SYNC=0 PATH="$d/mock-bin:$PATH" ZELLIJ_PANE_ID=99 ZELLIJ_SESSION_NAME=test-session bash -c 'set -euo pipefail; source "$1"; claim_main_for_send' bash "$lib_copy"
+  ) || return 1
+
+  jq -e '.panes.main.paneId == "99" and (.panes | has("pane-99") | not)' "$d/.zcrew/registry.json" >/dev/null
+}
+
+test_48_claim_main_for_send_noops_when_live_main_exists() {
+  local d lib_copy before after
+  d="$(new_test_dir 48)"
+  lib_copy="$d/zcrew-lib.sh"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register main --paneId 50 --sessionId s50 --agent unknown --cwd "$d" --pid 50 --status alive >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register pane-99 --paneId 99 --sessionId s99 --agent unknown --cwd "$d" --pid 99 --status alive >/dev/null 2>&1 || return 1
+  prepare_send_test_tools "$d" "$d/mock-bin" "$d/tell-args.txt" "50,99"
+  before="$(sha256sum "$d/.zcrew/registry.json")" || return 1
+  source_zcrew_lib "$lib_copy"
+
+  (
+    cd "$d" || exit 1
+    env -u BX_INSIDE ZCREW_AUTO_SYNC=0 PATH="$d/mock-bin:$PATH" ZELLIJ_PANE_ID=99 ZELLIJ_SESSION_NAME=test-session bash -c 'set -euo pipefail; source "$1"; claim_main_for_send' bash "$lib_copy"
+  ) || return 1
+  after="$(sha256sum "$d/.zcrew/registry.json")" || return 1
+
+  [[ "$before" == "$after" ]]
+}
+
+test_49_claim_main_for_send_worker_never_claims() {
+  local d lib_copy before after
+  d="$(new_test_dir 49)"
+  lib_copy="$d/zcrew-lib.sh"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register pane-99 --paneId 99 --sessionId s99 --agent unknown --cwd "$d" --pid 99 --status alive >/dev/null 2>&1 || return 1
+  prepare_send_test_tools "$d" "$d/mock-bin" "$d/tell-args.txt" "99"
+  before="$(sha256sum "$d/.zcrew/registry.json")" || return 1
+  source_zcrew_lib "$lib_copy"
+
+  (
+    cd "$d" || exit 1
+    BX_INSIDE=1 ZCREW_AUTO_SYNC=0 PATH="$d/mock-bin:$PATH" ZELLIJ_PANE_ID=99 ZELLIJ_SESSION_NAME=test-session bash -c 'set -euo pipefail; source "$1"; claim_main_for_send' bash "$lib_copy" >/dev/null
+  ) || return 1
+  after="$(sha256sum "$d/.zcrew/registry.json")" || return 1
+
+  [[ "$before" == "$after" ]]
+}
+
+test_50_send_rejects_self_send() {
+  local d mockbin args_file out
+  d="$(new_test_dir 50)"
+  mockbin="$d/mock-bin"
+  args_file="$d/tell-args.txt"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register main --paneId 0 --sessionId s --agent unknown --cwd "$d" --pid 1 --status alive >/dev/null 2>&1 || return 1
+  prepare_send_test_tools "$d" "$mockbin" "$args_file" "0"
+
+  if out=$(cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=0 "$ZCREW_BIN" send main "hello" 2>&1); then
+    return 1
+  fi
+  printf '%s\n' "$out" | grep -Fxq 'zcrew: cannot send to self' || return 1
+  [[ ! -e "$args_file" ]]
+}
+
+test_51_send_rejects_worker_to_worker() {
+  local d mockbin args_file out
+  d="$(new_test_dir 51)"
+  mockbin="$d/mock-bin"
+  args_file="$d/tell-args.txt"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register main --paneId 0 --sessionId s0 --agent unknown --cwd "$d" --pid 1 --status alive >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register piper --paneId 123 --sessionId s1 --agent pi --cwd "$d" --pid 2 --status alive >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register pane-77 --paneId 77 --sessionId s77 --agent unknown --cwd "$d" --pid 77 --status alive >/dev/null 2>&1 || return 1
+  prepare_send_test_tools "$d" "$mockbin" "$args_file" "0,77,123"
+
+  if out=$(cd "$d" && BX_INSIDE=1 PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=77 "$ZCREW_BIN" send piper "hello" 2>&1); then
+    return 1
+  fi
+  printf '%s\n' "$out" | grep -Fxq 'zcrew: worker panes cannot send directly to other workers; send results, questions, or blockers to main' || return 1
+  [[ ! -e "$args_file" ]]
+}
+
+test_52_send_banner_host_only() {
+  local d mockbin args_file sent banner expected
+  d="$(new_test_dir 52)"
+  mockbin="$d/mock-bin"
+  args_file="$d/tell-args.txt"
+  banner=$'hello host\n\nTo report a result, finding, blocker, or question, run this in your shell/bash tool. Do NOT write it as reply text:\n\n  zcrew send main "<your message>"\n\nCommunicate ONLY with main. Never send to other workers. Never send bare acknowledgments.'
+  expected="123 $banner"$'\n''0 hello worker'
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register main --paneId 0 --sessionId s0 --agent unknown --cwd "$d" --pid 1 --status alive >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register buddy --paneId 123 --sessionId s1 --agent claude --cwd "$d" --pid 2 --status alive >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register pane-77 --paneId 77 --sessionId s77 --agent unknown --cwd "$d" --pid 77 --status alive >/dev/null 2>&1 || return 1
+  prepare_send_test_tools "$d" "$mockbin" "$args_file" "0,77,123"
+
+  (cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=0 "$ZCREW_BIN" send buddy "hello host" >/dev/null 2>&1) || return 1
+  (cd "$d" && BX_INSIDE=1 PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=77 "$ZCREW_BIN" send main "hello worker" >/dev/null 2>&1) || return 1
+
+  sent="$(cat "$args_file")"
+  [[ "$sent" == "$expected" ]]
+}
+
+test_53_rename_main_alias_guards() {
+  local d out
+  d="$(new_test_dir 53)"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register main --paneId 0 --sessionId s0 --agent unknown --cwd "$d" --pid 1 --status alive >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register foo --paneId 1 --sessionId s1 --agent unknown --cwd "$d" --pid 2 --status alive >/dev/null 2>&1 || return 1
+  if out="$(zcrew_cmd "$d" rename main boss 2>&1)"; then
+    return 1
+  fi
+  printf '%s\n' "$out" | grep -Fxq 'zcrew: cannot rename main alias' || return 1
+  if out="$(zcrew_cmd "$d" rename foo main 2>&1)"; then
+    return 1
+  fi
+  printf '%s\n' "$out" | grep -Fxq 'zcrew: main alias is taken' || return 1
+
+  jq 'del(.panes.main)' "$d/.zcrew/registry.json" > "$d/.zcrew/registry.json.tmp" || return 1
+  mv "$d/.zcrew/registry.json.tmp" "$d/.zcrew/registry.json"
+  zcrew_cmd "$d" rename foo main >/dev/null 2>&1 || return 1
+  jq -e '.panes.main.paneId == "1" and (.panes | has("foo") | not)' "$d/.zcrew/registry.json" >/dev/null
+}
+
+test_54_send_claims_main_after_main_disappears() {
+  local d mockbin args_file
+  d="$(new_test_dir 54)"
+  mockbin="$d/mock-bin"
+  args_file="$d/tell-args.txt"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register helper --paneId 123 --sessionId s1 --agent claude --cwd "$d" --pid 2 --status alive >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register pane-88 --paneId 88 --sessionId s88 --agent unknown --cwd "$d" --pid 88 --status alive >/dev/null 2>&1 || return 1
+  prepare_send_test_tools "$d" "$mockbin" "$args_file" "88,123"
+
+  (cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=88 "$ZCREW_BIN" send helper "hello after restart" >/dev/null 2>&1) || return 1
+
+  jq -e '.panes.main.paneId == "88" and (.panes | has("pane-88") | not)' "$d/.zcrew/registry.json" >/dev/null || return 1
+  grep -Fq 'zcrew send main "<your message>"' "$args_file"
+}
+
 main() {
   mkdir -p "$TEST_ROOT"
 
@@ -1666,7 +1869,15 @@ main() {
   run_test "43) codex launcher forwards model to bx run" test_43_codex_launcher_forwards_model_to_bx_run
   run_test "44) codex launcher does not mutate sandbox config before bx run" test_44_codex_launcher_does_not_mutate_sandbox_config_before_bx_run
   run_test "45) install where src == target skips materialization without crashing" test_45_install_self_install_no_crash
-
+  run_test "46) resolve_sender_name_readonly is pure and returns empty for unmapped panes" test_46_resolve_sender_name_readonly_is_pure
+  run_test "47) claim_main_for_send promotes host pane to main when main is absent" test_47_claim_main_for_send_promotes_host_when_main_absent
+  run_test "48) claim_main_for_send no-ops when a live main exists" test_48_claim_main_for_send_noops_when_live_main_exists
+  run_test "49) claim_main_for_send no-ops inside workers" test_49_claim_main_for_send_worker_never_claims
+  run_test "50) send rejects self-send" test_50_send_rejects_self_send
+  run_test "51) send rejects worker-to-worker delivery" test_51_send_rejects_worker_to_worker
+  run_test "52) send banner is host-only with exact literal" test_52_send_banner_host_only
+  run_test "53) rename guards main alias" test_53_rename_main_alias_guards
+  run_test "54) send reclaims main after host restart" test_54_send_claims_main_after_main_disappears
 
   echo ""
   echo "Total: $PASS_COUNT PASS, $FAIL_COUNT FAIL"
