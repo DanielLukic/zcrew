@@ -144,7 +144,7 @@ test_4_dry_run_include_zcrew_prints_but_does_not_copy() {
 
   out="$(run_install_globals "$home_dir" --dry-run --include-zcrew 2>&1)" || return 1
 
-  printf '%s\n' "$out" | grep -Fq "would install $REPO_ROOT/bin/bx to $home_dir/.local/bin/bx" || return 1
+  printf '%s\n' "$out" | grep -Fq "would install $REPO_ROOT/.zcrew/bin/bx to $home_dir/.local/bin/bx" || return 1
   printf '%s\n' "$out" | grep -Fq "would sync $REPO_ROOT/.codex/skills/zcrew/ to $home_dir/.codex/skills/zcrew/" || return 1
   printf '%s\n' "$out" | grep -Fq "would sync $REPO_ROOT/.pi/skills/zspawn/ to $home_dir/.pi/agent/skills/zspawn/" || return 1
   [[ ! -e "$home_dir/.local/bin/bx" ]] || return 1

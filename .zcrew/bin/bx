@@ -561,7 +561,7 @@ run_bwrap() {
     emit_custom_mount_args args
 
     # Environment
-    local project_bin="$workdir/bin"
+    local project_bin="$workdir/.zcrew/bin"
     local sandbox_path="$project_bin:$SANDBOX_HOME/.local/share/mise/shims:$SANDBOX_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     args+=(
         --setenv HOME "$SANDBOX_HOME"

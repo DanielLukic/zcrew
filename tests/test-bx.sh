@@ -3,7 +3,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-BX_BIN="$REPO_ROOT/bin/bx"
+BX_BIN="$REPO_ROOT/.zcrew/bin/bx"
 TMP_ROOT="$REPO_ROOT/.tmp"
 BASE_PROJECT_ROOT="$TMP_ROOT/test"
 HOST_HOME="$TMP_ROOT/host-home"
@@ -526,7 +526,7 @@ test_21_run_scrubs_selected_env_and_preserves_api_keys() {
     printf '%s\n' "$out" | grep -Fxq 'OLLAMA_API_KEY=ollama-test-key' || return 1
     printf '%s\n' "$out" | grep -Fxq 'OPENAI_API_KEY=openai-test-key' || return 1
     printf '%s\n' "$out" | grep -Fxq 'ANTHROPIC_API_KEY=anthropic-test-key' || return 1
-    printf '%s\n' "$out" | grep -Eq "^PATH=$p/bin:" || return 1
+    printf '%s\n' "$out" | grep -Eq "^PATH=$p/\.zcrew/bin:" || return 1
     printf '%s\n' "$out" | grep -Eq "^PATH=.*:${HOME//\//\\/}/.local/share/mise/shims:" || return 1
 }
 
@@ -541,7 +541,7 @@ test_22_sandbox_tools_still_resolve() {
     (cd "$p" && mise trust .mise.toml >/dev/null 2>&1 && mise install >/dev/null 2>&1) || true
     out="$(bx_cmd "$p" run bash -lc 'printf "PATH=%s\n" "$PATH"; node --version >/dev/null; bun --version >/dev/null; rg --version >/dev/null; jq --version >/dev/null; for tool in mise bun rg jq node claude codex; do tool_path=$(command -v "$tool") || exit 1; printf "%s=%s\n" "$tool" "$tool_path"; done' 2>/dev/null)" || return 1
 
-    printf '%s\n' "$out" | grep -Eq "^PATH=$p/bin:" || return 1
+    printf '%s\n' "$out" | grep -Eq "^PATH=$p/\.zcrew/bin:" || return 1
     printf '%s\n' "$out" | grep -Eq "^PATH=.*:${HOME//\//\\/}/.local/share/mise/shims:" || return 1
     printf '%s\n' "$out" | grep -Eq "^node=${HOME//\//\\/}/.local/share/mise/(installs|shims)/" || return 1
     printf '%s\n' "$out" | grep -Eq "^bun=${HOME//\//\\/}/.local/share/mise/(installs|shims)/" || return 1

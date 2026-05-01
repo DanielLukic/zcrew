@@ -24,7 +24,30 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 target_dir="$HOME/.local/bin"
 systemd_target_dir="$HOME/.config/systemd/user"
 
-for tool in bx ix claude-auth-sync; do
+for tool in bx ix; do
+  src="$repo_root/.zcrew/bin/$tool"
+  dst="$target_dir/$tool"
+  backup="$dst.bak"
+  [[ -f "$src" ]] || { echo "missing source: $src" >&2; exit 1; }
+
+  if [[ "$dry_run" == "true" ]]; then
+    if [[ -e "$dst" ]]; then
+      echo "would back up $dst to $backup"
+    fi
+    echo "would install $src to $dst"
+    continue
+  fi
+
+  mkdir -p "$target_dir"
+  if [[ -e "$dst" ]]; then
+    cp "$dst" "$backup"
+  fi
+  cp "$src" "$dst"
+  chmod +x "$dst"
+  echo "installed $tool to $dst (backup at $backup)"
+done
+
+for tool in claude-auth-sync; do
   src="$repo_root/bin/$tool"
   dst="$target_dir/$tool"
   backup="$dst.bak"

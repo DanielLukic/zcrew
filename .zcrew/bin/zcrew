@@ -241,6 +241,79 @@ piper    pi      -       implementer
 EOF
 }
 
+zcrew_owned_bin_files() {
+  printf '%s\n' zcrew bx ix
+}
+
+zcrew_owned_lib_files() {
+  printf '%s\n' tell launchers/claude.sh launchers/codex.sh launchers/pi.sh
+}
+
+verify_managed_layout() {
+  local root="$1"
+  local rel
+  while IFS= read -r rel; do
+    [[ -x "$root/.zcrew/bin/$rel" ]] || return 1
+  done < <(zcrew_owned_bin_files)
+  while IFS= read -r rel; do
+    [[ -x "$root/.zcrew/lib/$rel" ]] || return 1
+  done < <(zcrew_owned_lib_files)
+}
+
+copy_managed_layout() {
+  local src_root="$1"
+  local target_root="$2"
+  mkdir -p "$target_root/.zcrew/bin" "$target_root/.zcrew/lib/launchers"
+  local rel
+  while IFS= read -r rel; do
+    cp "$src_root/.zcrew/bin/$rel" "$target_root/.zcrew/bin/$rel"
+    chmod +x "$target_root/.zcrew/bin/$rel"
+  done < <(zcrew_owned_bin_files)
+  while IFS= read -r rel; do
+    mkdir -p "$(dirname "$target_root/.zcrew/lib/$rel")"
+    cp "$src_root/.zcrew/lib/$rel" "$target_root/.zcrew/lib/$rel"
+    chmod +x "$target_root/.zcrew/lib/$rel"
+  done < <(zcrew_owned_lib_files)
+}
+
+has_stale_layout() {
+  local root="$1"
+  local rel
+  while IFS= read -r rel; do
+    [[ -e "$root/bin/$rel" ]] && return 0
+  done < <(zcrew_owned_bin_files)
+  while IFS= read -r rel; do
+    [[ -e "$root/lib/zcrew/$rel" ]] && return 0
+  done < <(zcrew_owned_lib_files)
+  return 1
+}
+
+remove_stale_layout() {
+  local root="$1"
+  local rel unexpected=false
+  while IFS= read -r rel; do
+    rm -f "$root/bin/$rel"
+  done < <(zcrew_owned_bin_files)
+  rmdir --ignore-fail-on-non-empty "$root/bin" 2>/dev/null || true
+
+  if [[ -d "$root/lib/zcrew" ]]; then
+    while IFS= read -r rel; do
+      rm -f "$root/lib/zcrew/$rel"
+    done < <(zcrew_owned_lib_files)
+
+    local path
+    while IFS= read -r path; do
+      [[ -n "$path" ]] || continue
+      unexpected=true
+      echo "warning: unexpected files under legacy lib/zcrew preserved: $path" >&2
+    done < <(cd "$root/lib/zcrew" && find . -type f | sed 's#^\./##' | sort)
+
+    rmdir --ignore-fail-on-non-empty "$root/lib/zcrew/launchers" 2>/dev/null || true
+    rmdir --ignore-fail-on-non-empty "$root/lib/zcrew" 2>/dev/null || true
+    rmdir --ignore-fail-on-non-empty "$root/lib" 2>/dev/null || true
+  fi
+}
+
 write_managed_mise_floor() {
   local target_dir="$1"
   local config_dir="$target_dir/.config"
@@ -254,7 +327,7 @@ write_managed_mise_floor() {
 node = "lts"
 
 [env]
-_.path = ["bin"]
+_.path = [".zcrew/bin"]
 EOF
 }
 
@@ -415,11 +488,11 @@ cmd_spawn() {
   # STEP 4: built-ins use per-agent launchers; unknown agents fall back to a
   # generic `bx run <agent>` command. The bash wrapper sets a trap so when the
   # agent (and bx) exit, the registry entry is auto-removed.
-  local zcrew_abs="$PROJECT_DIR/bin/zcrew"
+  local zcrew_abs="$PROJECT_DIR/.zcrew/bin/zcrew"
   local trap_cmd="trap '\"$zcrew_abs\" unregister \"$name\"' EXIT"
   local launch_cmd
-  if [[ -x "$PROJECT_DIR/lib/zcrew/launchers/$agent.sh" ]]; then
-    launch_cmd="$PROJECT_DIR/lib/zcrew/launchers/$agent.sh"
+  if [[ -x "$PROJECT_DIR/.zcrew/lib/launchers/$agent.sh" ]]; then
+    launch_cmd="$PROJECT_DIR/.zcrew/lib/launchers/$agent.sh"
   else
     launch_cmd="bx run $(printf '%q' "$agent")"
     if [[ -n "$model" ]]; then
@@ -503,12 +576,12 @@ install_bootstrap() {
   fi
   (
     cd "$target"
-    env -u BX_INSIDE ./bin/bx init >/dev/null
+    env -u BX_INSIDE ./.zcrew/bin/bx init >/dev/null
   )
   echo "    .bx/ (bx init — idempotent)"
   (
     cd "$target"
-    ./bin/zcrew init >/dev/null
+    ./.zcrew/bin/zcrew init >/dev/null
   )
   echo "    .zcrew/ (zcrew init — idempotent)"
   if [[ -d "$target/.bx" ]]; then
@@ -533,8 +606,7 @@ install_bootstrap() {
 }
 
 # Install zcrew into a target project directory.
-# Copies bin/, skills, launchers, and managed install config — idempotent.
-# Initializes .bx/ in the target if missing.
+# Copies .zcrew-owned bin/lib content plus skills and managed config.
 cmd_install() {
   CURRENT_SUBCMD="install"
   local target="${1:-}"
@@ -543,18 +615,23 @@ cmd_install() {
   local target_abs
   target_abs=$(realpath "$target")
 
-  # Resolve our own source location: bin/zcrew → repo root
   local self src
   self=$(readlink -f "${BASH_SOURCE[0]}")
-  src=$(dirname "$(dirname "$self")")
-  [[ -f "$src/bin/zcrew" ]] || { echo "zcrew: source repo not found at $src" >&2; exit 1; }
+  src=$(dirname "$(dirname "$(dirname "$self")")")
+  [[ -f "$src/.zcrew/bin/zcrew" ]] || { echo "zcrew: source repo not found at $src" >&2; exit 1; }
+  [[ -f "$src/.zcrew/bin/bx" ]] || { echo "zcrew: source bx missing at $src/.zcrew/bin/bx" >&2; exit 1; }
+  [[ -f "$src/.zcrew/bin/ix" ]] || { echo "zcrew: source ix missing at $src/.zcrew/bin/ix" >&2; exit 1; }
+  [[ -f "$src/.zcrew/lib/tell" ]] || { echo "zcrew: source tell missing at $src/.zcrew/lib/tell" >&2; exit 1; }
+  [[ -f "$src/.zcrew/lib/launchers/claude.sh" ]] || { echo "zcrew: source launcher missing at $src/.zcrew/lib/launchers/claude.sh" >&2; exit 1; }
+  [[ -f "$src/.zcrew/lib/launchers/codex.sh" ]] || { echo "zcrew: source launcher missing at $src/.zcrew/lib/launchers/codex.sh" >&2; exit 1; }
+  [[ -f "$src/.zcrew/lib/launchers/pi.sh" ]] || { echo "zcrew: source launcher missing at $src/.zcrew/lib/launchers/pi.sh" >&2; exit 1; }
   [[ -d "$src/.agents/skills/zcrew" ]] || { echo "zcrew: source skill dir missing at $src/.agents/skills/zcrew" >&2; exit 1; }
   [[ -d "$src/.claude/skills" ]] || { echo "zcrew: source skills dir missing at $src/.claude/skills" >&2; exit 1; }
   [[ -d "$src/.pi/skills" ]] || { echo "zcrew: source skills dir missing at $src/.pi/skills" >&2; exit 1; }
   [[ -d "$src/.codex/skills/zcrew" ]] || { echo "zcrew: source skill dir missing at $src/.codex/skills/zcrew" >&2; exit 1; }
   [[ -f "$src/AGENTS.md" ]] || { echo "zcrew: source AGENTS.md missing at $src/AGENTS.md" >&2; exit 1; }
 
-  local src_abs
+  local src_abs migrated stale
   src_abs=$(realpath "$src")
   if [[ "$src_abs" == "$target_abs" ]]; then
     echo "==> source == target ($target_abs); skipping materialization, running bootstrap only"
@@ -562,19 +639,21 @@ cmd_install() {
     return 0
   fi
 
-  echo "==> installing zcrew from $src into $target"
+  migrated=false
+  stale=false
+  [[ -x "$target/.zcrew/bin/zcrew" ]] && migrated=true
+  if [[ "$migrated" != "true" ]] && has_stale_layout "$target"; then
+    stale=true
+  fi
 
-  # bin tools
-  mkdir -p "$target/bin"
-  cp "$src/bin/zcrew" "$target/bin/zcrew"
-  chmod +x "$target/bin/zcrew"
-  echo "    bin/zcrew"
-  cp "$src/bin/bx" "$target/bin/bx"
-  chmod +x "$target/bin/bx"
-  echo "    bin/bx"
-  cp "$src/bin/ix" "$target/bin/ix"
-  chmod +x "$target/bin/ix"
-  echo "    bin/ix"
+  echo "==> installing zcrew from $src into $target"
+  copy_managed_layout "$src" "$target"
+  if ! verify_managed_layout "$target"; then
+    copy_managed_layout "$src" "$target"
+  fi
+  verify_managed_layout "$target" || { echo "zcrew: failed to materialize managed .zcrew/bin and .zcrew/lib layout" >&2; exit 1; }
+  echo "    .zcrew/bin/{zcrew,bx,ix}"
+  echo "    .zcrew/lib/{tell,launchers/*}"
 
   # Canonical cross-tool skill first so copied symlinks resolve in-target.
   mkdir -p "$target/.agents/skills"
@@ -582,7 +661,6 @@ cmd_install() {
   cp -r "$src/.agents/skills/zcrew" "$target/.agents/skills/"
   echo "    .agents/skills/zcrew"
 
-  # Skills (overwrite — these are zcrew's own)
   mkdir -p "$target/.claude/skills"
   for skill in zspawn zsend zpanes zsync zname zclose zcrew; do
     rm -rf "$target/.claude/skills/$skill"
@@ -634,18 +712,15 @@ cmd_install() {
   rm -f "$target/.claude/hooks/zcrew-register.sh"
   rmdir --ignore-fail-on-non-empty "$target/.claude/hooks" 2>/dev/null || true
 
-  # Launchers
-  mkdir -p "$target/lib/zcrew/launchers"
-  cp "$src/lib/zcrew/tell" "$target/lib/zcrew/tell"
-  chmod +x "$target/lib/zcrew/tell"
-  echo "    lib/zcrew/tell"
-  for l in claude codex pi; do
-    cp "$src/lib/zcrew/launchers/$l.sh" "$target/lib/zcrew/launchers/$l.sh"
-    chmod +x "$target/lib/zcrew/launchers/$l.sh"
-    echo "    lib/zcrew/launchers/$l.sh"
-  done
+  if [[ "$stale" == "true" ]]; then
+    remove_stale_layout "$target"
+  fi
 
   install_bootstrap "$target"
+
+  if [[ "$stale" == "true" ]]; then
+    echo "warning: close all worker panes before relying on the new layout — in-flight EXIT traps still reference old bin/zcrew"
+  fi
 
   echo ""
   echo "==> zcrew installed in $target_abs"
@@ -968,7 +1043,7 @@ cmd_send() {
   fi
 
   refresh_claude_auth_for_target "$(lookup_registered_cwd "$name")" "$(lookup_registered_agent "$name")"
-  local tell_bin="$PROJECT_DIR/lib/zcrew/tell"
+  local tell_bin="$PROJECT_DIR/.zcrew/lib/tell"
   if [[ ! -x "$tell_bin" ]]; then
     echo "zcrew: missing tell transport at $tell_bin — run: zcrew install ." >&2
     exit 1
