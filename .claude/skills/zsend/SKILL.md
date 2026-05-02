@@ -6,4 +6,6 @@ disable-model-invocation: true
 allowed-tools: Bash(zcrew send:*)
 ---
 
+Workers reporting back to main should prefer `zcrew reply "<message>"`.
+
 !`zcrew send $ARGUMENTS`

@@ -480,7 +480,7 @@ test_9b_send_compact_calls_tell_twice_with_delay() {
   second="$(sed -n '2p' "$args_file")"
   [[ "$first" == "123 /compact" ]] || return 1
   printf '%s\n' "$second" | grep -q '123 hello compact' || return 1
-  grep -q 'zcrew send main' "$args_file"
+  grep -q 'zcrew reply' "$args_file"
 }
 
 test_9c_send_without_compact_calls_tell_once() {
@@ -1833,7 +1833,8 @@ test_51_send_rejects_worker_to_worker() {
   if out=$(cd "$d" && BX_INSIDE=1 PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=77 "$ZCREW_BIN" send piper "hello" 2>&1); then
     return 1
   fi
-  printf '%s\n' "$out" | grep -Fxq 'zcrew: worker panes cannot send directly to other workers; send results, questions, or blockers to main' || return 1
+  printf '%s\n' "$out" | grep -Fq 'zcrew: worker panes cannot send directly to other workers.' || return 1
+  printf '%s\n' "$out" | grep -Fq 'zcrew reply' || return 1
   [[ ! -e "$args_file" ]]
 }
 
@@ -1842,7 +1843,7 @@ test_52_send_banner_host_only() {
   d="$(new_test_dir 52)"
   mockbin="$d/mock-bin"
   args_file="$d/tell-args.txt"
-  banner=$'hello host\n\nTo report a result, finding, blocker, or question, run this in your shell/bash tool. Do NOT write it as reply text:\n\n  zcrew send main "<your message>"\n\nCommunicate ONLY with main. Never send to other workers. Never send bare acknowledgments.'
+  banner=$'hello host\n\nTo report a result, finding, blocker, or question, run in your shell/bash tool — not as reply text:\n\n  zcrew reply "<your message>"\n\nOnly reply when you have a result, finding, blocker, or question. Never send acknowledgments. Never send to other workers.'
   expected="123 $banner"$'\n''0 hello worker'
 
   zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
@@ -1894,7 +1895,7 @@ test_54_send_claims_main_after_main_disappears() {
   (cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=88 "$ZCREW_BIN" send helper "hello after restart" >/dev/null 2>&1) || return 1
 
   jq -e '.panes.main.paneId == "88" and (.panes | has("pane-88") | not)' "$d/.zcrew/registry.json" >/dev/null || return 1
-  grep -Fq 'zcrew send main "<your message>"' "$args_file"
+  grep -Fq 'zcrew reply "<your message>"' "$args_file"
 }
 
 test_55_install_migrates_stale_layout_when_single_old_file_exists() {
@@ -2101,6 +2102,59 @@ test_69_install_keep_ignored_for_source_equals_target() {
   printf '%s\n' "$out" | grep -Fq 'source == target'
 }
 
+test_70_reply_rejects_host_usage() {
+  local d out
+  d="$(new_test_dir 70)"
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+
+  if out=$(cd "$d" && env -u BX_INSIDE ZELLIJ_SESSION_NAME=test-session "$ZCREW_BIN" reply "hello" 2>&1); then
+    return 1
+  fi
+  printf '%s\n' "$out" | grep -Fxq 'zcrew reply is for worker panes; from main, use: zcrew send <worker> "<message>"'
+}
+
+test_71_reply_requires_message() {
+  local d mockbin out
+  d="$(new_test_dir 71)"
+  mockbin="$d/mock-bin"
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  prepare_send_test_tools "$d" "$mockbin" "$d/tell-args.txt" "0"
+
+  if out=$(cd "$d" && BX_INSIDE=1 PATH="$mockbin:$PATH" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=77 "$ZCREW_BIN" reply 2>&1); then
+    return 1
+  fi
+  printf '%s\n' "$out" | grep -Fxq 'Usage: zcrew reply <message>'
+}
+
+test_72_reply_from_worker_sends_to_main() {
+  local d mockbin args_file
+  d="$(new_test_dir 72)"
+  mockbin="$d/mock-bin"
+  args_file="$d/tell-args.txt"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register main --paneId 0 --sessionId s0 --agent unknown --cwd "$d" --pid 1 --status alive >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register pane-77 --paneId 77 --sessionId s77 --agent unknown --cwd "$d" --pid 77 --status alive >/dev/null 2>&1 || return 1
+  prepare_send_test_tools "$d" "$mockbin" "$args_file" "0,77"
+
+  (cd "$d" && BX_INSIDE=1 PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=77 "$ZCREW_BIN" reply "foo" >/dev/null 2>&1) || return 1
+
+  [[ "$(cat "$args_file")" == '0 foo' ]] || return 1
+  grep -Fq $'\tsend\tinfo\tentry name=main' "$d/.zcrew/audit.log"
+}
+
+test_73_reply_cmd_constant_is_single_source() {
+  [[ "$(grep -Fc 'REPLY_CMD=' "$ZCREW_BIN")" -eq 1 ]] || return 1
+  [[ "$(grep -Fc 'REPLY_CMD' "$ZCREW_BIN")" -ge 3 ]]
+}
+
+test_74_skill_docs_reference_reply_for_workers() {
+  grep -Fq 'zcrew reply "' "$REPO_ROOT/.agents/skills/zcrew/SKILL.md" || return 1
+  grep -Fq 'zcrew reply' "$REPO_ROOT/.claude/skills/zsend/SKILL.md" || return 1
+  grep -Fq 'zcrew reply' "$REPO_ROOT/.pi/skills/zsend/SKILL.md" || return 1
+  grep -Fq 'zcrew reply "' "$REPO_ROOT/.codex/skills/zcrew/SKILL.md"
+}
+
 main() {
   mkdir -p "$TEST_ROOT"
 
@@ -2202,6 +2256,11 @@ main() {
   run_test "67) install without --keep leaves unrelated symlink alone" test_67_install_without_keep_leaves_unrelated_symlink_alone
   run_test "68) stale migration + --keep creates transitional symlinks after migration" test_68_install_keep_after_migration_creates_symlinks
   run_test "69) source==target ignores --keep" test_69_install_keep_ignored_for_source_equals_target
+  run_test "70) reply rejects host usage" test_70_reply_rejects_host_usage
+  run_test "71) reply requires message" test_71_reply_requires_message
+  run_test "72) reply from worker sends to main" test_72_reply_from_worker_sends_to_main
+  run_test "73) REPLY_CMD constant is single-source" test_73_reply_cmd_constant_is_single_source
+  run_test "74) skill docs reference zcrew reply for workers" test_74_skill_docs_reference_reply_for_workers
 
   echo ""
   echo "Total: $PASS_COUNT PASS, $FAIL_COUNT FAIL"
