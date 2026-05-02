@@ -1,4 +1,6 @@
 #!/bin/bash
+# zcrew-managed
+# zcrew launcher: codex
 # zcrew launcher: codex (bx-wrapped)
 # -a never + -s danger-full-access: disable both approval prompts and codex's
 # own sandbox. The sandbox disable is critical — codex's sandbox mounts a
