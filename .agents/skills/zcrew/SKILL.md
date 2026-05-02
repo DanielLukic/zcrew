@@ -14,6 +14,9 @@ Starts a new named pane running `claude`, `codex`, or `pi`. Optional `--model` p
 `zcrew send [--compact] <name> <message>`
 Sends a message to a registered pane by name. `--compact` injects `/compact` before delivery — use when starting a new task on an existing agent.
 
+`zcrew reply <message>`
+For worker panes only. Sends a result, finding, blocker, or question back to `main`.
+
 `zcrew close <name>`
 Closes a registered pane and unregisters it.
 
@@ -37,6 +40,8 @@ Example: `Bash(zcrew send claudio "hello world")`
 You discuss, plan, delegate, and verify. You do not implement directly. Your job is to understand what the user wants, break it into actionable work, dispatch it to the right agent, and ensure quality before reporting back.
 
 ### Orchestrator rules
+
+When a worker needs to report back to main, use `zcrew reply "<message>"`.
 
 - **Never implement in the master pane** — always dispatch to a team member.
 - **Never ack in circles** — if an agent reports progress, don't echo it back. Only respond when you have new information, a decision, or a correction. Silence is fine.

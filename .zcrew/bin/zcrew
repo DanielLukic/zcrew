@@ -25,6 +25,7 @@ BX_DIR="$PROJECT_DIR/.bx"
 CURRENT_SUBCMD="main"
 ZCREW_AUTO_SYNC="${ZCREW_AUTO_SYNC:-1}"
 ZCREW_PROJECT_READY=0
+REPLY_CMD='zcrew reply "<your message>"'
 
 if [[ "${ZCREW_DEBUG:-0}" == "1" ]]; then
   PS4='+[$(date +%H:%M:%S.%N) $$ ${FUNCNAME[0]:-main}]+ '
@@ -1143,7 +1144,7 @@ cmd_send() {
   fi
 
   if [[ -n "${BX_INSIDE:-}" && "$name" != "main" ]]; then
-    echo "zcrew: worker panes cannot send directly to other workers; send results, questions, or blockers to main" >&2
+    echo "zcrew: worker panes cannot send directly to other workers. Send results, questions, or blockers to main with: $REPLY_CMD." >&2
     exit 1
   fi
 
@@ -1168,7 +1169,7 @@ cmd_send() {
 
   local send_body
   if [[ -z "${BX_INSIDE:-}" && ! "$message" =~ ^/[a-zA-Z][a-zA-Z0-9_-]*($|[[:space:]]) ]]; then
-    send_body="${message}"$'\n\n'"To report a result, finding, blocker, or question, run this in your shell/bash tool. Do NOT write it as reply text:"$'\n\n'"  zcrew send main \"<your message>\""$'\n\n'"Communicate ONLY with main. Never send to other workers. Never send bare acknowledgments."
+    send_body="${message}"$'\n\n'"To report a result, finding, blocker, or question, run in your shell/bash tool — not as reply text:"$'\n\n'"  ${REPLY_CMD}"$'\n\n'"Only reply when you have a result, finding, blocker, or question. Never send acknowledgments. Never send to other workers."
   else
     send_body="$message"
   fi
@@ -1176,6 +1177,16 @@ cmd_send() {
   "$tell_bin" "$pane_id" "$send_body"
   logger "send" "info" "sent name=$name paneId=$pane_id sender=${sender_name:-unknown} inside=${BX_INSIDE:-0}"
   echo "sent: $name ($pane_id)"
+}
+
+cmd_reply() {
+  CURRENT_SUBCMD="reply"
+  if [[ -z "${BX_INSIDE:-}" ]]; then
+    echo "zcrew reply is for worker panes; from main, use: zcrew send <worker> \"<message>\"" >&2
+    exit 1
+  fi
+  [[ $# -gt 0 ]] || { echo "Usage: zcrew reply <message>" >&2; exit 1; }
+  cmd_send main "$@"
 }
 
 cmd_list() {
@@ -1279,6 +1290,7 @@ main() {
     close) dispatch_registry_command cmd_close "$@" ;;
     spawn) dispatch_registry_command cmd_spawn "$@" ;;
     send) dispatch_registry_command cmd_send "$@" ;;
+    reply) dispatch_registry_command cmd_reply "$@" ;;
     list) dispatch_registry_command cmd_list "$@" ;;
     sync) cmd_sync "$@" ;;
     *)
@@ -1292,6 +1304,7 @@ Commands:
   rename <old> <new>
   close <name>
   send <name> <message>
+  reply <message>
   list [--json]
   sync [--keep-stale|--prune]
   register <name> [--paneId X] [--sessionId Y] [--agent A] [--cwd P] [--pid N] [--status S]
