@@ -1,4 +1,5 @@
 #!/bin/bash
+# zcrew-managed
 set -euo pipefail
 [[ -n "${IX_INSIDE:-}" ]] && { echo "ix: already inside an ix container" >&2; exit 1; }
 [[ -n "${BX_INSIDE:-}" ]] && { echo "ix: cannot run inside a bx sandbox (no incus socket)" >&2; exit 1; }

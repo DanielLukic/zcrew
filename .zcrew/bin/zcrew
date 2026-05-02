@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# zcrew-managed
 set -euo pipefail
 
 find_project_root() {
@@ -279,6 +280,46 @@ is_keep_symlink() {
   [[ -L "$file" && "$(readlink "$file")" == "$expected" ]]
 }
 
+is_zcrew_owned_file() {
+  local path="$1"
+  local rel="$2"
+  [[ -f "$path" ]] || return 1
+  if grep -q '^# zcrew-managed' "$path"; then
+    case "$rel" in
+      lib/zcrew/launchers/claude.sh) grep -q '^# zcrew launcher: claude$' "$path" && return 0 ;;
+      lib/zcrew/launchers/codex.sh) grep -q '^# zcrew launcher: codex$' "$path" && return 0 ;;
+      lib/zcrew/launchers/pi.sh) grep -q '^# zcrew launcher: pi$' "$path" && return 0 ;;
+      *) return 0 ;;
+    esac
+  fi
+  case "$rel" in
+    bin/zcrew)
+      grep -q 'CURRENT_SUBCMD' "$path"
+      ;;
+    bin/bx)
+      grep -q 'export BX_INSIDE=1' "$path" && { grep -q 'BX_UNSETENV_VARS' "$path" || grep -q 'bx-bashrc-version' "$path"; }
+      ;;
+    bin/ix)
+      grep -q 'IX_INSIDE' "$path"
+      ;;
+    lib/zcrew/tell)
+      grep -q 'zellij action write 27 91 50 48 48 126' "$path"
+      ;;
+    lib/zcrew/launchers/claude.sh)
+      grep -q '^# zcrew launcher: claude$' "$path" || grep -q -- '--dangerously-skip-permissions' "$path"
+      ;;
+    lib/zcrew/launchers/codex.sh)
+      grep -q '^# zcrew launcher: codex$' "$path" || grep -q 'danger-full-access' "$path"
+      ;;
+    lib/zcrew/launchers/pi.sh)
+      grep -q '^# zcrew launcher: pi$' "$path" || grep -q 'PI_PACKAGE_DIR' "$path"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 create_keep_symlinks() {
   local root="$1"
   local rel dst expected
@@ -346,25 +387,21 @@ has_stale_layout() {
 remove_stale_layout() {
   local root="$1"
   local delete_real="${2:-false}"
-  local src_root="${3:-}"
-  local rel src_path
+  local rel
   while IFS= read -r rel; do
     local path="$root/bin/$rel"
-    src_path=""
-    [[ -n "$src_root" ]] && src_path="$(owned_source_path_for "$src_root" "bin/$rel")"
+    local rel_path="bin/$rel"
     if [[ -L "$path" ]]; then
       if is_keep_symlink "$path" "$root"; then
         rm -f "$path"
-      elif [[ "$delete_real" == "true" && -n "$src_path" && -e "$src_path" && "$(readlink -f "$path" 2>/dev/null || true)" == "$(readlink -f "$src_path")" ]]; then
-        rm -f "$path"
       else
-        echo "warning: leaving existing non-zcrew symlink at bin/$rel" >&2
+        echo "warning: leaving existing non-zcrew symlink at $rel_path" >&2
       fi
     elif [[ -e "$path" ]]; then
-      if [[ "$delete_real" == "true" && -n "$src_path" && -e "$src_path" ]] && cmp -s "$path" "$src_path"; then
+      if [[ "$delete_real" == "true" ]] && is_zcrew_owned_file "$path" "$rel_path"; then
         rm -f "$path"
       else
-        echo "warning: keeping existing non-symlink at bin/$rel" >&2
+        echo "warning: cannot verify $rel_path is zcrew-owned; remove manually if you don't need it: rm \"$path\"" >&2
       fi
     fi
   done < <(zcrew_owned_bin_files)
@@ -373,21 +410,18 @@ remove_stale_layout() {
   if [[ -d "$root/lib/zcrew" ]]; then
     while IFS= read -r rel; do
       local path="$root/lib/zcrew/$rel"
-      src_path=""
-      [[ -n "$src_root" ]] && src_path="$(owned_source_path_for "$src_root" "lib/zcrew/$rel")"
+      local rel_path="lib/zcrew/$rel"
       if [[ -L "$path" ]]; then
         if is_keep_symlink "$path" "$root"; then
           rm -f "$path"
-        elif [[ "$delete_real" == "true" && -n "$src_path" && -e "$src_path" && "$(readlink -f "$path" 2>/dev/null || true)" == "$(readlink -f "$src_path")" ]]; then
-          rm -f "$path"
         else
-          echo "warning: leaving existing non-zcrew symlink at lib/zcrew/$rel" >&2
+          echo "warning: leaving existing non-zcrew symlink at $rel_path" >&2
         fi
       elif [[ -e "$path" ]]; then
-        if [[ "$delete_real" == "true" && -n "$src_path" && -e "$src_path" ]] && cmp -s "$path" "$src_path"; then
+        if [[ "$delete_real" == "true" ]] && is_zcrew_owned_file "$path" "$rel_path"; then
           rm -f "$path"
         else
-          echo "warning: keeping existing non-symlink at lib/zcrew/$rel" >&2
+          echo "warning: cannot verify $rel_path is zcrew-owned; remove manually if you don't need it: rm \"$path\"" >&2
         fi
       fi
     done < <(zcrew_owned_lib_files)
@@ -818,7 +852,7 @@ cmd_install() {
   rmdir --ignore-fail-on-non-empty "$target/.claude/hooks" 2>/dev/null || true
 
   if [[ "$stale" == "true" ]]; then
-    remove_stale_layout "$target" true "$src"
+    remove_stale_layout "$target" true
   elif [[ "$keep_compat" != "true" ]]; then
     remove_stale_layout "$target"
   fi

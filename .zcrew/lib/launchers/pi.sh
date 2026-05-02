@@ -1,4 +1,5 @@
 #!/bin/bash
+# zcrew-managed
 # zcrew launcher: pi
 #
 # Pi inside bx needs:

@@ -1,4 +1,5 @@
 #!/bin/bash
+# zcrew-managed
 # zcrew launcher: claude
 # bx-wrapped claude in bypass-permissions mode. Safe because bx is the actual
 # sandbox boundary — per-tool prompts just get in the way inside it.

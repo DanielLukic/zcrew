@@ -2059,7 +2059,7 @@ test_66_install_keep_warns_and_skips_real_file_collision() {
 
   out="$(zcrew_cmd "$TEST_ROOT" install "$d" 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
   [[ -f "$d/bin/zcrew" && ! -L "$d/bin/zcrew" ]] || return 1
-  printf '%s\n' "$out" | grep -Fq 'warning: keeping existing non-symlink at bin/zcrew'
+  printf '%s\n' "$out" | grep -Fq 'warning: cannot verify bin/zcrew is zcrew-owned; remove manually if you don'"'"'t need it:'
 }
 
 test_67_install_without_keep_leaves_unrelated_symlink_alone() {
@@ -2153,6 +2153,103 @@ test_74_skill_docs_reference_reply_for_workers() {
   grep -Fq 'zcrew reply' "$REPO_ROOT/.claude/skills/zsend/SKILL.md" || return 1
   grep -Fq 'zcrew reply' "$REPO_ROOT/.pi/skills/zsend/SKILL.md" || return 1
   grep -Fq 'zcrew reply "' "$REPO_ROOT/.codex/skills/zcrew/SKILL.md"
+}
+
+test_75_upgrade_removes_marker_matched_legacy_file_even_if_different() {
+  local d out
+  d="$(new_test_dir 75)"
+  mkdir -p "$d/bin"
+  cat > "$d/bin/zcrew" <<'EOF'
+#!/usr/bin/env bash
+# zcrew-managed
+echo legacy-but-owned
+CURRENT_SUBCMD=legacy
+EOF
+  chmod +x "$d/bin/zcrew"
+
+  out="$(zcrew_cmd "$TEST_ROOT" install "$d" 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
+  [[ ! -e "$d/bin/zcrew" ]] || return 1
+}
+
+test_76_upgrade_preserves_unmarked_user_file_with_warning() {
+  local d out before after
+  d="$(new_test_dir 76)"
+  mkdir -p "$d/bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'echo mine' > "$d/bin/zcrew"
+  chmod +x "$d/bin/zcrew"
+  before="$(cat "$d/bin/zcrew")"
+
+  out="$(zcrew_cmd "$TEST_ROOT" install "$d" 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
+  after="$(cat "$d/bin/zcrew")"
+  [[ "$before" == "$after" ]] || return 1
+  printf '%s\n' "$out" | grep -Fq 'warning: cannot verify bin/zcrew is zcrew-owned; remove manually if you don'"'"'t need it:'
+}
+
+test_77_upgrade_absent_file_is_noop_without_warning() {
+  local d out
+  d="$(new_test_dir 77)"
+  mkdir -p "$d"
+
+  out="$(zcrew_cmd "$TEST_ROOT" install "$d" 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
+  ! printf '%s\n' "$out" | grep -Fq 'cannot verify bin/zcrew is zcrew-owned'
+}
+
+test_78_keep_symlink_regression_still_removed_without_keep() {
+  local d
+  d="$(new_test_dir 78)"
+  mkdir -p "$d"
+  zcrew_cmd "$TEST_ROOT" install --keep "$d" >/dev/null 2>&1 || return 1
+  zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
+  [[ ! -e "$d/bin/zcrew" ]] || return 1
+  [[ ! -e "$d/lib/zcrew/tell" ]]
+}
+
+test_79_upgrade_removes_header_owned_forward_compat_file() {
+  local d
+  d="$(new_test_dir 79)"
+  mkdir -p "$d/lib/zcrew/launchers"
+  cat > "$d/lib/zcrew/launchers/claude.sh" <<'EOF'
+#!/bin/bash
+# zcrew-managed
+# zcrew launcher: claude
+exit 0
+EOF
+  chmod +x "$d/lib/zcrew/launchers/claude.sh"
+
+  zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
+  [[ ! -e "$d/lib/zcrew/launchers/claude.sh" ]]
+}
+
+test_80_upgrade_preserves_bx_with_incomplete_fallback_marker() {
+  local d out
+  d="$(new_test_dir 80)"
+  mkdir -p "$d/bin"
+  cat > "$d/bin/bx" <<'EOF'
+#!/bin/bash
+export BX_INSIDE=1
+EOF
+  chmod +x "$d/bin/bx"
+
+  out="$(zcrew_cmd "$TEST_ROOT" install "$d" 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
+  [[ -f "$d/bin/bx" ]] || return 1
+  printf '%s\n' "$out" | grep -Fq 'warning: cannot verify bin/bx is zcrew-owned; remove manually if you don'"'"'t need it:'
+}
+
+test_81_upgrade_preserves_launcher_with_mismatched_header() {
+  local d out
+  d="$(new_test_dir 81)"
+  mkdir -p "$d/lib/zcrew/launchers"
+  cat > "$d/lib/zcrew/launchers/codex.sh" <<'EOF'
+#!/bin/bash
+# zcrew-managed
+# zcrew launcher: claude
+exit 0
+EOF
+  chmod +x "$d/lib/zcrew/launchers/codex.sh"
+
+  out="$(zcrew_cmd "$TEST_ROOT" install "$d" 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
+  [[ -f "$d/lib/zcrew/launchers/codex.sh" ]] || return 1
+  printf '%s\n' "$out" | grep -Fq 'warning: cannot verify lib/zcrew/launchers/codex.sh is zcrew-owned; remove manually if you don'"'"'t need it:'
 }
 
 main() {
@@ -2261,6 +2358,13 @@ main() {
   run_test "72) reply from worker sends to main" test_72_reply_from_worker_sends_to_main
   run_test "73) REPLY_CMD constant is single-source" test_73_reply_cmd_constant_is_single_source
   run_test "74) skill docs reference zcrew reply for workers" test_74_skill_docs_reference_reply_for_workers
+  run_test "75) upgrade removes marker-matched legacy file even if content differs" test_75_upgrade_removes_marker_matched_legacy_file_even_if_different
+  run_test "76) upgrade preserves unmarked user file with warning" test_76_upgrade_preserves_unmarked_user_file_with_warning
+  run_test "77) upgrade absent file is no-op without warning" test_77_upgrade_absent_file_is_noop_without_warning
+  run_test "78) keep symlink regression remains intact" test_78_keep_symlink_regression_still_removed_without_keep
+  run_test "79) upgrade removes header-owned forward-compat file" test_79_upgrade_removes_header_owned_forward_compat_file
+  run_test "80) upgrade preserves bx file with incomplete fallback marker" test_80_upgrade_preserves_bx_with_incomplete_fallback_marker
+  run_test "81) upgrade preserves launcher with mismatched header" test_81_upgrade_preserves_launcher_with_mismatched_header
 
   echo ""
   echo "Total: $PASS_COUNT PASS, $FAIL_COUNT FAIL"
