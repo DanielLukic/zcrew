@@ -2387,6 +2387,20 @@ EOF
   printf '%s\n' "$out" | grep -Fq 'warning: .bx/mounts has invalid zcrew-managed markers; preserving existing file:'
 }
 
+test_82d_install_mount_block_includes_managed_bx_files_ro() {
+  local d target_abs
+  d="$(new_test_dir 82d)"
+  target_abs="$(realpath "$d")"
+  mkdir -p "$d"
+
+  zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
+
+  grep -Fqx "$target_abs/.bx/config $target_abs/.bx/config ro" "$d/.bx/mounts" || return 1
+  grep -Fqx "$target_abs/.bx/mounts $target_abs/.bx/mounts ro" "$d/.bx/mounts" || return 1
+  grep -Fqx "$target_abs/.bx/.gitignore $target_abs/.bx/.gitignore ro" "$d/.bx/mounts" || return 1
+  grep -Fqx "$target_abs/.bx/home/.config/git/ignore $target_abs/.bx/home/.config/git/ignore ro" "$d/.bx/mounts"
+}
+
 test_83_bx_ro_mount_blocks_zcrew_deletion_but_home_stays_writable() {
   local d host_home out
   d="$(new_test_dir 83)"
@@ -2399,6 +2413,40 @@ test_83_bx_ro_mount_blocks_zcrew_deletion_but_home_stays_writable() {
   [[ -e "$d/.zcrew/bin/zcrew" ]] || return 1
   [[ -f "$d/.bx/home/.writable" ]] || return 1
   printf '%s\n' "$out" | grep -Eiq 'Read-only file system|Permission denied'
+}
+
+test_83b_bx_ro_mount_blocks_managed_bx_files_but_home_stays_writable() {
+  local d host_home out
+  d="$(new_test_dir 83b)"
+  host_home="$d/host-home"
+  mkdir -p "$d" "$host_home"
+
+  zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
+  out="$(cd "$d" && env -u BX_INSIDE HOME="$host_home" TERM="${TERM:-xterm-256color}" "$REPO_ROOT/.zcrew/bin/bx" run bash -lc '
+    set +e
+    failures=0
+    for path in .bx/config .bx/mounts .bx/.gitignore .bx/home/.config/git/ignore; do
+      rm -f "$path" >/dev/null 2>&1
+      status_rm=$?
+      printf x > "$path" >/dev/null 2>&1
+      status_write=$?
+      if [[ $status_rm -eq 0 || $status_write -eq 0 ]]; then
+        echo "unexpectedly writable: $path"
+        failures=1
+      fi
+    done
+    printf "# sandbox-write\n" >> ~/.bashrc || failures=1
+    printf "sandbox-claude\n" > ~/.claude.json || failures=1
+    exit $failures
+  ' 2>&1 || true)"
+
+  grep -Fq 'WORKDIR=' "$d/.bx/config" || return 1
+  grep -Fq '# zcrew-managed begin' "$d/.bx/mounts" || return 1
+  grep -Fq 'home/' "$d/.bx/.gitignore" || return 1
+  grep -Fq '.zcrew/' "$d/.bx/home/.config/git/ignore" || return 1
+  grep -Fq '# sandbox-write' "$d/.bx/home/.bashrc" || return 1
+  grep -Fxq 'sandbox-claude' "$d/.bx/home/.claude.json" || return 1
+  ! printf '%s\n' "$out" | grep -Fq 'unexpectedly writable:'
 }
 
 main() {
@@ -2521,7 +2569,9 @@ main() {
   run_test "82) install mount block rewrite is idempotent" test_82_install_mount_block_rewrite_is_idempotent
   run_test "82b) install preserves corrupt mount markers with warning" test_82b_install_preserves_corrupt_mount_markers_with_warning
   run_test "82c) install preserves misordered mount markers with warning" test_82c_install_preserves_misordered_mount_markers_with_warning
+  run_test "82d) install mount block includes managed bx files ro" test_82d_install_mount_block_includes_managed_bx_files_ro
   run_test "83) bx RO mount blocks .zcrew deletion while HOME stays writable" test_83_bx_ro_mount_blocks_zcrew_deletion_but_home_stays_writable
+  run_test "83b) bx RO mount blocks managed bx files while HOME stays writable" test_83b_bx_ro_mount_blocks_managed_bx_files_but_home_stays_writable
 
   echo ""
   echo "Total: $PASS_COUNT PASS, $FAIL_COUNT FAIL"

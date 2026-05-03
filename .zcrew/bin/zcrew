@@ -256,6 +256,10 @@ write_managed_bx_mounts() {
 $zellij_sock_dir $zellij_sock_dir rw
 $target_abs/.zcrew $workdir/.zcrew ro
 $target_abs/.config/mise.toml $workdir/.config/mise.toml ro
+$target_abs/.bx/config $workdir/.bx/config ro
+$target_abs/.bx/mounts $workdir/.bx/mounts ro
+$target_abs/.bx/.gitignore $workdir/.bx/.gitignore ro
+$target_abs/.bx/home/.config/git/ignore $workdir/.bx/home/.config/git/ignore ro
 # zcrew-managed end
 EOF
 
