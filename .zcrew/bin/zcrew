@@ -139,54 +139,111 @@ mount_line_dst() {
   esac
 }
 
-ensure_bx_managed_mounts() {
-  local target_dir="${1:-.}"
+resolve_bx_workdir_for_target() {
+  local target_dir="$1"
+  local target_abs config_file workdir
+  target_abs="$(realpath "$target_dir")"
+  config_file="$target_dir/.bx/config"
+  workdir="$target_abs"
+  if [[ -f "$config_file" ]]; then
+    workdir="$(awk -F= '/^WORKDIR=/{print substr($0,9); exit}' "$config_file")"
+    [[ -n "$workdir" ]] || workdir="$target_abs"
+  fi
+  printf '%s\n' "$workdir"
+}
+
+write_managed_sandbox_gitignore() {
+  local target_dir="$1"
+  local git_config_dir="$target_dir/.bx/home/.config/git"
+  local ignore_file="$git_config_dir/ignore"
+  local gitconfig_file="$target_dir/.bx/home/.gitconfig"
+
+  mkdir -p "$git_config_dir"
+  cat > "$ignore_file" <<'EOF'
+# zcrew-managed
+.bx/
+.zcrew/
+.config/mise.toml
+.agents/skills/zcrew/
+.claude/skills/zcrew
+.claude/skills/zspawn
+.claude/skills/zsend
+.claude/skills/zpanes
+.claude/skills/zsync
+.claude/skills/zname
+.claude/skills/zclose
+.pi/skills/zcrew
+.pi/skills/zspawn
+.pi/skills/zsend
+.pi/skills/zpanes
+.pi/skills/zsync
+.pi/skills/zname
+.pi/skills/zclose
+.codex/skills/zcrew/
+bin/zcrew
+bin/bx
+bin/ix
+EOF
+
+  if [[ ! -f "$gitconfig_file" ]] || grep -q '^# zcrew-managed$' "$gitconfig_file"; then
+    cat > "$gitconfig_file" <<'EOF'
+# zcrew-managed
+[core]
+	excludesfile = ~/.config/git/ignore
+EOF
+  fi
+}
+
+write_managed_bx_mounts() {
+  local target_dir="$1"
   local bx_dir="$target_dir/.bx"
   [[ -d "$bx_dir" ]] || return 1
 
   local mounts_file="$bx_dir/mounts"
-  local zellij_sock_dir="/run/user/$(id -u)/zellij"
-  local managed_dsts=("$zellij_sock_dir")
-  local canonical_lines=("$zellij_sock_dir $zellij_sock_dir rw")
+  local target_abs workdir zellij_sock_dir tmp before after in_managed=false line
+  target_abs="$(realpath "$target_dir")"
+  workdir="$(resolve_bx_workdir_for_target "$target_dir")"
+  zellij_sock_dir="/run/user/$(id -u)/zellij"
 
-  local tmp="$mounts_file.tmp.$$"
-  local line
+  mkdir -p "$bx_dir"
+  [[ -f "$mounts_file" ]] || : > "$mounts_file"
+  tmp="$mounts_file.tmp.$$"
   : > "$tmp"
-  if [[ -f "$mounts_file" ]]; then
-    while IFS= read -r line || [[ -n "$line" ]]; do
-      local dst=""
-      dst=$(mount_line_dst "$line" 2>/dev/null || true)
-      local managed="false"
-      local managed_dst
-      for managed_dst in "${managed_dsts[@]}"; do
-        if [[ "$dst" == "$managed_dst" ]]; then
-          managed="true"
-          break
-        fi
-      done
-      if [[ "$managed" != "true" ]]; then
-        printf '%s\n' "$line" >> "$tmp"
-      fi
-    done < "$mounts_file"
-  fi
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == '# zcrew-managed begin' ]]; then
+      in_managed=true
+      continue
+    fi
+    if [[ "$line" == '# zcrew-managed end' ]]; then
+      in_managed=false
+      continue
+    fi
+    if [[ "$in_managed" == "true" ]]; then
+      continue
+    fi
+    printf '%s\n' "$line" >> "$tmp"
+  done < "$mounts_file"
 
-  local canonical_line
-  for canonical_line in "${canonical_lines[@]}"; do
-    printf '%s\n' "$canonical_line" >> "$tmp"
-  done
+  cat >> "$tmp" <<EOF
+# zcrew-managed begin
+$zellij_sock_dir $zellij_sock_dir rw
+$target_abs/.zcrew $workdir/.zcrew ro
+$target_abs/.config/mise.toml $workdir/.config/mise.toml ro
+# zcrew-managed end
+EOF
 
-  local before="" after
-  if [[ -f "$mounts_file" ]]; then
-    before=$(cat "$mounts_file")
-  fi
-  after=$(cat "$tmp")
+  before="$(cat "$mounts_file")"
+  after="$(cat "$tmp")"
   if [[ "$before" == "$after" ]]; then
     rm -f "$tmp"
     return 1
   fi
-
   mv "$tmp" "$mounts_file"
   return 0
+}
+
+ensure_bx_managed_mounts() {
+  write_managed_bx_mounts "$@"
 }
 
 # Detect a stale ZELLIJ_SESSION_NAME — happens when the user renames the
@@ -713,8 +770,10 @@ install_bootstrap() {
       "home/" \
       ".provisioned"
     echo "    .bx/.gitignore (ensured managed entries)"
+    write_managed_sandbox_gitignore "$target"
+    echo "    .bx/home/.config/git/ignore (zcrew managed)"
     if ensure_bx_managed_mounts "$target"; then
-      echo "    .bx/mounts (seeded managed rw mounts)"
+      echo "    .bx/mounts (rewrote managed block)"
     fi
   fi
   if [[ -d "$target/.zcrew" ]]; then

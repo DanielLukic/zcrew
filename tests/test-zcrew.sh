@@ -721,11 +721,12 @@ test_11e_spawn_builtin_agent_uses_launcher_script() {
 }
 
 test_11f_spawn_seeds_missing_managed_mounts() {
-  local d mockbin args_file out zellij_sock
+  local d mockbin args_file out zellij_sock target_abs
   d="$(new_test_dir 11f)"
   mockbin="$d/mock-bin"
   args_file="$d/zellij-args.txt"
   zellij_sock="/run/user/$(id -u)/zellij"
+  target_abs="$(realpath "$d")"
 
   zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
   rm -f "$d/.bx/mounts"
@@ -743,23 +744,30 @@ test_11f_spawn_seeds_missing_managed_mounts() {
 
   printf '%s\n' "$out" | grep -Fq 'spawned: healer (claude) pane=557' || return 1
   [[ -f "$d/.bx/mounts" ]] || return 1
-  grep -Fqx "$zellij_sock $zellij_sock rw" "$d/.bx/mounts"
+  grep -Fqx '# zcrew-managed begin' "$d/.bx/mounts" || return 1
+  grep -Fqx "$zellij_sock $zellij_sock rw" "$d/.bx/mounts" || return 1
+  grep -Fqx "$target_abs/.zcrew $target_abs/.zcrew ro" "$d/.bx/mounts" || return 1
+  grep -Fqx "$target_abs/.config/mise.toml $target_abs/.config/mise.toml ro" "$d/.bx/mounts"
 }
 
 test_11g_spawn_repairs_managed_mounts_preserving_custom_lines() {
-  local d mockbin args_file out zellij_sock custom_src custom_dst
+  local d mockbin args_file out zellij_sock custom_src custom_dst target_abs
   d="$(new_test_dir 11g)"
   mockbin="$d/mock-bin"
   args_file="$d/zellij-args.txt"
   zellij_sock="/run/user/$(id -u)/zellij"
   custom_src="$d/custom-src"
   custom_dst="/opt/custom"
+  target_abs="$(realpath "$d")"
 
   zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
   mkdir -p "$d/.bx" "$d/.zcrew/lib/launchers" "$custom_src"
   cat > "$d/.bx/mounts" <<EOF
 $custom_src $custom_dst ro
+# zcrew-managed begin
 /old/zellij /run/user/$(id -u)/zellij rw
+/old/project/.zcrew /old/workdir/.zcrew ro
+# zcrew-managed end
 EOF
   printf '#!/usr/bin/env bash\nexit 0\n' > "$d/.zcrew/lib/launchers/claude.sh"
   chmod +x "$d/.zcrew/lib/launchers/claude.sh"
@@ -775,7 +783,9 @@ EOF
   printf '%s\n' "$out" | grep -Fq 'spawned: healer2 (claude) pane=558' || return 1
   grep -Fqx "$custom_src $custom_dst ro" "$d/.bx/mounts" || return 1
   grep -Fqx "$zellij_sock $zellij_sock rw" "$d/.bx/mounts" || return 1
-  [[ "$(grep -Fxc "$zellij_sock $zellij_sock rw" "$d/.bx/mounts")" -eq 1 ]]
+  grep -Fqx "$target_abs/.zcrew $target_abs/.zcrew ro" "$d/.bx/mounts" || return 1
+  grep -Fqx "$target_abs/.config/mise.toml $target_abs/.config/mise.toml ro" "$d/.bx/mounts" || return 1
+  [[ "$(grep -Fxc '# zcrew-managed begin' "$d/.bx/mounts")" -eq 1 ]]
 }
 
 test_12_send_outside_project_fails_hard() {
@@ -1010,6 +1020,59 @@ test_18f_install_trusts_managed_mise_floor_when_mise_exists() {
 
   [[ -f "$args_file" ]] || return 1
   grep -Fxq "$TEST_ROOT:trust $d/.config/mise.toml" "$args_file"
+}
+
+test_18g_install_writes_sandbox_git_ignore_and_managed_gitconfig() {
+  local d ignore_file gitconfig_file
+  d="$(new_test_dir 18g)"
+  ignore_file="$d/.bx/home/.config/git/ignore"
+  gitconfig_file="$d/.bx/home/.gitconfig"
+  mkdir -p "$d"
+
+  zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
+
+  [[ -f "$ignore_file" ]] || return 1
+  grep -Fxq '# zcrew-managed' "$ignore_file" || return 1
+  grep -Fxq '.bx/' "$ignore_file" || return 1
+  grep -Fxq '.zcrew/' "$ignore_file" || return 1
+  grep -Fxq '.config/mise.toml' "$ignore_file" || return 1
+  grep -Fxq '.codex/skills/zcrew/' "$ignore_file" || return 1
+  grep -Fxq 'bin/zcrew' "$ignore_file" || return 1
+  [[ -f "$gitconfig_file" ]] || return 1
+  grep -Fxq '# zcrew-managed' "$gitconfig_file" || return 1
+  grep -Fq 'excludesfile = ~/.config/git/ignore' "$gitconfig_file"
+}
+
+test_18h_install_preserves_user_sandbox_gitconfig() {
+  local d gitconfig_file before after
+  d="$(new_test_dir 18h)"
+  gitconfig_file="$d/.bx/home/.gitconfig"
+  mkdir -p "$(dirname "$gitconfig_file")"
+  cat > "$gitconfig_file" <<'EOF'
+[user]
+	name = custom
+EOF
+  before="$(cat "$gitconfig_file")"
+
+  zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
+  after="$(cat "$gitconfig_file")"
+
+  [[ "$before" == "$after" ]]
+}
+
+test_18i_install_rewrites_managed_sandbox_gitconfig() {
+  local d gitconfig_file
+  d="$(new_test_dir 18i)"
+  gitconfig_file="$d/.bx/home/.gitconfig"
+  mkdir -p "$(dirname "$gitconfig_file")"
+  cat > "$gitconfig_file" <<'EOF'
+# zcrew-managed
+[core]
+	excludesfile = /tmp/wrong
+EOF
+
+  zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
+  grep -Fq 'excludesfile = ~/.config/git/ignore' "$gitconfig_file"
 }
 
 test_19_find_project_root_from_root_uses_local_state() {
@@ -2252,6 +2315,32 @@ EOF
   printf '%s\n' "$out" | grep -Fq 'warning: cannot verify lib/zcrew/launchers/codex.sh is zcrew-owned; remove manually if you don'"'"'t need it:'
 }
 
+test_82_install_mount_block_rewrite_is_idempotent() {
+  local d first second
+  d="$(new_test_dir 82)"
+  mkdir -p "$d"
+
+  zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
+  first="$(cat "$d/.bx/mounts")"
+  zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
+  second="$(cat "$d/.bx/mounts")"
+  [[ "$first" == "$second" ]]
+}
+
+test_83_bx_ro_mount_blocks_zcrew_deletion_but_home_stays_writable() {
+  local d host_home out
+  d="$(new_test_dir 83)"
+  host_home="$d/host-home"
+  mkdir -p "$d" "$host_home"
+
+  zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
+  out="$(cd "$d" && env -u BX_INSIDE HOME="$host_home" TERM="${TERM:-xterm-256color}" "$REPO_ROOT/.zcrew/bin/bx" run bash -lc 'touch ~/.writable && rm -rf .zcrew' 2>&1 || true)"
+
+  [[ -e "$d/.zcrew/bin/zcrew" ]] || return 1
+  [[ -f "$d/.bx/home/.writable" ]] || return 1
+  printf '%s\n' "$out" | grep -Eiq 'Read-only file system|Permission denied'
+}
+
 main() {
   mkdir -p "$TEST_ROOT"
 
@@ -2292,6 +2381,9 @@ main() {
   run_test "18d) install no longer creates .envrc" test_18d_install_does_not_create_envrc
   run_test "18e) install leaves existing .envrc untouched" test_18e_install_preserves_existing_envrc_content
   run_test "18f) install trusts managed mise floor when mise exists" test_18f_install_trusts_managed_mise_floor_when_mise_exists
+  run_test "18g) install writes sandbox git ignore and managed gitconfig" test_18g_install_writes_sandbox_git_ignore_and_managed_gitconfig
+  run_test "18h) install preserves user sandbox gitconfig" test_18h_install_preserves_user_sandbox_gitconfig
+  run_test "18i) install rewrites managed sandbox gitconfig" test_18i_install_rewrites_managed_sandbox_gitconfig
   run_test "19) find_project_root uses state from project root" test_19_find_project_root_from_root_uses_local_state
   run_test "20) find_project_root walks up from subdir" test_20_find_project_root_walks_up_from_subdir
   run_test "20b) find_project_root fails outside zcrew tree" test_20b_find_project_root_fails_outside_zcrew_tree
@@ -2365,6 +2457,8 @@ main() {
   run_test "79) upgrade removes header-owned forward-compat file" test_79_upgrade_removes_header_owned_forward_compat_file
   run_test "80) upgrade preserves bx file with incomplete fallback marker" test_80_upgrade_preserves_bx_with_incomplete_fallback_marker
   run_test "81) upgrade preserves launcher with mismatched header" test_81_upgrade_preserves_launcher_with_mismatched_header
+  run_test "82) install mount block rewrite is idempotent" test_82_install_mount_block_rewrite_is_idempotent
+  run_test "83) bx RO mount blocks .zcrew deletion while HOME stays writable" test_83_bx_ro_mount_blocks_zcrew_deletion_but_home_stays_writable
 
   echo ""
   echo "Total: $PASS_COUNT PASS, $FAIL_COUNT FAIL"
