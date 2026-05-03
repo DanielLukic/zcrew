@@ -262,7 +262,8 @@ write_managed_bx_mounts() {
   cat >> "$tmp" <<EOF
 # zcrew-managed begin
 $zellij_sock_dir $zellij_sock_dir rw
-$target_abs/.zcrew $workdir/.zcrew ro
+$target_abs/.zcrew/bin $workdir/.zcrew/bin ro
+$target_abs/.zcrew/lib $workdir/.zcrew/lib ro
 $target_abs/.config/mise.toml $workdir/.config/mise.toml ro
 $target_abs/.bx/config $workdir/.bx/config ro
 $target_abs/.bx/mounts $workdir/.bx/mounts ro
