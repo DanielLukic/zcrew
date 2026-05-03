@@ -850,7 +850,8 @@ test_11j_spawn_outside_zellij_skips_claim_without_error() {
 
   (
     cd "$d" || exit 1
-    PATH="$mockbin:$PATH" MOCK_ZELLIJ_ARGS_FILE="$args_file" \
+    env -u BX_INSIDE -u ZELLIJ_PANE_ID \
+      PATH="$mockbin:$PATH" MOCK_ZELLIJ_ARGS_FILE="$args_file" \
       MOCK_ZELLIJ_LIST_OUTPUT='' MOCK_ZELLIJ_NEW_PANE_OUTPUT='terminal_561' \
       ZELLIJ_SESSION_NAME='test-session' "$ZCREW_BIN" spawn claude plain >/dev/null 2>&1
   ) || return 1
