@@ -2388,9 +2388,11 @@ EOF
 }
 
 test_82d_install_mount_block_includes_managed_bx_files_ro() {
-  local d target_abs
+  local d target_abs sandbox_home
   d="$(new_test_dir 82d)"
   target_abs="$(realpath "$d")"
+  sandbox_home="$(getent passwd "$(id -u)" | cut -d: -f6)"
+  sandbox_home="${sandbox_home:-$HOME}"
   mkdir -p "$d"
 
   zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
@@ -2398,7 +2400,8 @@ test_82d_install_mount_block_includes_managed_bx_files_ro() {
   grep -Fqx "$target_abs/.bx/config $target_abs/.bx/config ro" "$d/.bx/mounts" || return 1
   grep -Fqx "$target_abs/.bx/mounts $target_abs/.bx/mounts ro" "$d/.bx/mounts" || return 1
   grep -Fqx "$target_abs/.bx/.gitignore $target_abs/.bx/.gitignore ro" "$d/.bx/mounts" || return 1
-  grep -Fqx "$target_abs/.bx/home/.config/git/ignore $target_abs/.bx/home/.config/git/ignore ro" "$d/.bx/mounts"
+  grep -Fqx "$target_abs/.bx/home/.config/git/ignore $target_abs/.bx/home/.config/git/ignore ro" "$d/.bx/mounts" || return 1
+  grep -Fqx "$target_abs/.bx/home/.config/git/ignore $sandbox_home/.config/git/ignore ro" "$d/.bx/mounts"
 }
 
 test_83_bx_ro_mount_blocks_zcrew_deletion_but_home_stays_writable() {
@@ -2425,7 +2428,7 @@ test_83b_bx_ro_mount_blocks_managed_bx_files_but_home_stays_writable() {
   out="$(cd "$d" && env -u BX_INSIDE HOME="$host_home" TERM="${TERM:-xterm-256color}" "$REPO_ROOT/.zcrew/bin/bx" run bash -lc '
     set +e
     failures=0
-    for path in .bx/config .bx/mounts .bx/.gitignore .bx/home/.config/git/ignore; do
+    for path in .bx/config .bx/mounts .bx/.gitignore .bx/home/.config/git/ignore ~/.config/git/ignore; do
       rm -f "$path" >/dev/null 2>&1
       status_rm=$?
       printf x > "$path" >/dev/null 2>&1
