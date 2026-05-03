@@ -2687,6 +2687,9 @@ test_83_bx_ro_mount_blocks_zcrew_bin_and_lib_but_runtime_state_stays_writable() 
     status_lib_rm=$?
     printf runtime-audit >> .zcrew/audit.log || failures=1
     printf "{\"ok\":true}\n" > .zcrew/registry.json || failures=1
+    : > .zcrew/registry.lock || failures=1
+    mkdir -p .zcrew/feed .zcrew/outbox .zcrew/spawn || failures=1
+    touch .zcrew/feed/probe .zcrew/outbox/probe .zcrew/spawn/probe || failures=1
     touch ~/.writable || failures=1
     if [[ $status_bin_rm -eq 0 || $status_lib_rm -eq 0 ]]; then
       failures=1
@@ -2698,6 +2701,10 @@ test_83_bx_ro_mount_blocks_zcrew_bin_and_lib_but_runtime_state_stays_writable() 
   [[ -e "$d/.zcrew/lib/tell" ]] || return 1
   grep -Fq 'runtime-audit' "$d/.zcrew/audit.log" || return 1
   grep -Fxq '{"ok":true}' "$d/.zcrew/registry.json" || return 1
+  [[ -f "$d/.zcrew/registry.lock" ]] || return 1
+  [[ -f "$d/.zcrew/feed/probe" ]] || return 1
+  [[ -f "$d/.zcrew/outbox/probe" ]] || return 1
+  [[ -f "$d/.zcrew/spawn/probe" ]] || return 1
   [[ -f "$d/.bx/home/.writable" ]]
 }
 
