@@ -1075,6 +1075,25 @@ EOF
   grep -Fq 'excludesfile = ~/.config/git/ignore' "$gitconfig_file"
 }
 
+test_18j_install_preserves_gitconfig_with_nonleading_managed_marker() {
+  local d gitconfig_file before after
+  d="$(new_test_dir 18j)"
+  gitconfig_file="$d/.bx/home/.gitconfig"
+  mkdir -p "$(dirname "$gitconfig_file")"
+  cat > "$gitconfig_file" <<'EOF'
+[user]
+	name = custom
+# zcrew-managed
+[core]
+	excludesfile = /tmp/user-choice
+EOF
+  before="$(cat "$gitconfig_file")"
+
+  zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
+  after="$(cat "$gitconfig_file")"
+  [[ "$before" == "$after" ]]
+}
+
 test_19_find_project_root_from_root_uses_local_state() {
   local d out
   d="$(new_test_dir 19-project)"
@@ -2327,6 +2346,26 @@ test_82_install_mount_block_rewrite_is_idempotent() {
   [[ "$first" == "$second" ]]
 }
 
+test_82b_install_preserves_corrupt_mount_markers_with_warning() {
+  local d out before after custom_src custom_dst
+  d="$(new_test_dir 82b)"
+  custom_src="$d/custom-src"
+  custom_dst="/opt/custom"
+  mkdir -p "$d/.bx" "$custom_src"
+  cat > "$d/.bx/mounts" <<EOF
+$custom_src $custom_dst ro
+# zcrew-managed begin
+/old/zellij /run/user/$(id -u)/zellij rw
+$custom_src /opt/after ro
+EOF
+  before="$(cat "$d/.bx/mounts")"
+
+  out="$(zcrew_cmd "$TEST_ROOT" install "$d" 2>&1)" || return 1
+  after="$(cat "$d/.bx/mounts")"
+  [[ "$before" == "$after" ]] || return 1
+  printf '%s\n' "$out" | grep -Fq 'warning: .bx/mounts has incomplete zcrew-managed markers; preserving existing file:'
+}
+
 test_83_bx_ro_mount_blocks_zcrew_deletion_but_home_stays_writable() {
   local d host_home out
   d="$(new_test_dir 83)"
@@ -2384,6 +2423,7 @@ main() {
   run_test "18g) install writes sandbox git ignore and managed gitconfig" test_18g_install_writes_sandbox_git_ignore_and_managed_gitconfig
   run_test "18h) install preserves user sandbox gitconfig" test_18h_install_preserves_user_sandbox_gitconfig
   run_test "18i) install rewrites managed sandbox gitconfig" test_18i_install_rewrites_managed_sandbox_gitconfig
+  run_test "18j) install preserves gitconfig with nonleading managed marker" test_18j_install_preserves_gitconfig_with_nonleading_managed_marker
   run_test "19) find_project_root uses state from project root" test_19_find_project_root_from_root_uses_local_state
   run_test "20) find_project_root walks up from subdir" test_20_find_project_root_walks_up_from_subdir
   run_test "20b) find_project_root fails outside zcrew tree" test_20b_find_project_root_fails_outside_zcrew_tree
@@ -2458,6 +2498,7 @@ main() {
   run_test "80) upgrade preserves bx file with incomplete fallback marker" test_80_upgrade_preserves_bx_with_incomplete_fallback_marker
   run_test "81) upgrade preserves launcher with mismatched header" test_81_upgrade_preserves_launcher_with_mismatched_header
   run_test "82) install mount block rewrite is idempotent" test_82_install_mount_block_rewrite_is_idempotent
+  run_test "82b) install preserves corrupt mount markers with warning" test_82b_install_preserves_corrupt_mount_markers_with_warning
   run_test "83) bx RO mount blocks .zcrew deletion while HOME stays writable" test_83_bx_ro_mount_blocks_zcrew_deletion_but_home_stays_writable
 
   echo ""
