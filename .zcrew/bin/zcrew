@@ -201,7 +201,7 @@ write_managed_bx_mounts() {
 
   local mounts_file="$bx_dir/mounts"
   local target_abs workdir zellij_sock_dir tmp before after in_managed=false line
-  local begin_count=0 end_count=0
+  local pair_count=0
   target_abs="$(realpath "$target_dir")"
   workdir="$(resolve_bx_workdir_for_target "$target_dir")"
   zellij_sock_dir="/run/user/$(id -u)/zellij"
@@ -211,17 +211,29 @@ write_managed_bx_mounts() {
 
   while IFS= read -r line || [[ -n "$line" ]]; do
     if [[ "$line" == '# zcrew-managed begin' ]]; then
-      begin_count=$((begin_count + 1))
-    elif [[ "$line" == '# zcrew-managed end' ]]; then
-      end_count=$((end_count + 1))
+      if [[ "$in_managed" == "true" ]]; then
+        echo "warning: .bx/mounts has invalid zcrew-managed markers; preserving existing file: $mounts_file" >&2
+        return 1
+      fi
+      in_managed=true
+      continue
+    fi
+    if [[ "$line" == '# zcrew-managed end' ]]; then
+      if [[ "$in_managed" != "true" ]]; then
+        echo "warning: .bx/mounts has invalid zcrew-managed markers; preserving existing file: $mounts_file" >&2
+        return 1
+      fi
+      in_managed=false
+      pair_count=$((pair_count + 1))
     fi
   done < "$mounts_file"
 
-  if [[ "$begin_count" -ne "$end_count" ]]; then
-    echo "warning: .bx/mounts has incomplete zcrew-managed markers; preserving existing file: $mounts_file" >&2
+  if [[ "$in_managed" == "true" ]] || [[ "$pair_count" -gt 1 ]]; then
+    echo "warning: .bx/mounts has invalid zcrew-managed markers; preserving existing file: $mounts_file" >&2
     return 1
   fi
 
+  in_managed=false
   tmp="$mounts_file.tmp.$$"
   : > "$tmp"
   while IFS= read -r line || [[ -n "$line" ]]; do

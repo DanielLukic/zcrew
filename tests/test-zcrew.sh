@@ -2363,7 +2363,28 @@ EOF
   out="$(zcrew_cmd "$TEST_ROOT" install "$d" 2>&1)" || return 1
   after="$(cat "$d/.bx/mounts")"
   [[ "$before" == "$after" ]] || return 1
-  printf '%s\n' "$out" | grep -Fq 'warning: .bx/mounts has incomplete zcrew-managed markers; preserving existing file:'
+  printf '%s\n' "$out" | grep -Fq 'warning: .bx/mounts has invalid zcrew-managed markers; preserving existing file:'
+}
+
+test_82c_install_preserves_misordered_mount_markers_with_warning() {
+  local d out before after custom_src custom_dst
+  d="$(new_test_dir 82c)"
+  custom_src="$d/custom-src"
+  custom_dst="/opt/custom"
+  mkdir -p "$d/.bx" "$custom_src"
+  cat > "$d/.bx/mounts" <<EOF
+$custom_src $custom_dst ro
+# zcrew-managed end
+$custom_src /opt/between ro
+# zcrew-managed begin
+$custom_src /opt/after ro
+EOF
+  before="$(cat "$d/.bx/mounts")"
+
+  out="$(zcrew_cmd "$TEST_ROOT" install "$d" 2>&1)" || return 1
+  after="$(cat "$d/.bx/mounts")"
+  [[ "$before" == "$after" ]] || return 1
+  printf '%s\n' "$out" | grep -Fq 'warning: .bx/mounts has invalid zcrew-managed markers; preserving existing file:'
 }
 
 test_83_bx_ro_mount_blocks_zcrew_deletion_but_home_stays_writable() {
@@ -2499,6 +2520,7 @@ main() {
   run_test "81) upgrade preserves launcher with mismatched header" test_81_upgrade_preserves_launcher_with_mismatched_header
   run_test "82) install mount block rewrite is idempotent" test_82_install_mount_block_rewrite_is_idempotent
   run_test "82b) install preserves corrupt mount markers with warning" test_82b_install_preserves_corrupt_mount_markers_with_warning
+  run_test "82c) install preserves misordered mount markers with warning" test_82c_install_preserves_misordered_mount_markers_with_warning
   run_test "83) bx RO mount blocks .zcrew deletion while HOME stays writable" test_83_bx_ro_mount_blocks_zcrew_deletion_but_home_stays_writable
 
   echo ""
