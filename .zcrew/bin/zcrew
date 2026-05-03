@@ -152,6 +152,13 @@ resolve_bx_workdir_for_target() {
   printf '%s\n' "$workdir"
 }
 
+resolve_bx_sandbox_home() {
+  local sandbox_home
+  sandbox_home="$(getent passwd "$(id -u)" | cut -d: -f6)"
+  sandbox_home="${sandbox_home:-$HOME}"
+  printf '%s\n' "$sandbox_home"
+}
+
 write_managed_sandbox_gitignore() {
   local target_dir="$1"
   local git_config_dir="$target_dir/.bx/home/.config/git"
@@ -200,10 +207,11 @@ write_managed_bx_mounts() {
   [[ -d "$bx_dir" ]] || return 1
 
   local mounts_file="$bx_dir/mounts"
-  local target_abs workdir zellij_sock_dir tmp before after in_managed=false line
+  local target_abs workdir sandbox_home zellij_sock_dir tmp before after in_managed=false line
   local pair_count=0
   target_abs="$(realpath "$target_dir")"
   workdir="$(resolve_bx_workdir_for_target "$target_dir")"
+  sandbox_home="$(resolve_bx_sandbox_home)"
   zellij_sock_dir="/run/user/$(id -u)/zellij"
 
   mkdir -p "$bx_dir"
@@ -260,6 +268,7 @@ $target_abs/.bx/config $workdir/.bx/config ro
 $target_abs/.bx/mounts $workdir/.bx/mounts ro
 $target_abs/.bx/.gitignore $workdir/.bx/.gitignore ro
 $target_abs/.bx/home/.config/git/ignore $workdir/.bx/home/.config/git/ignore ro
+$target_abs/.bx/home/.config/git/ignore $sandbox_home/.config/git/ignore ro
 # zcrew-managed end
 EOF
 
