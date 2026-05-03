@@ -383,10 +383,71 @@ test_6_sync_prune_with_mocked_zellij() {
 
   (
     cd "$d" || exit 1
-    PATH="$mockbin:$PATH" MOCK_ZELLIJ_LIST_OUTPUT='terminal_123' "$ZCREW_BIN" sync >/dev/null 2>&1
+    env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_ZELLIJ_LIST_OUTPUT='terminal_123' "$ZCREW_BIN" sync >/dev/null 2>&1
   ) || return 1
 
   jq -e '.panes | has("live") and (has("stale")|not)' "$d/.zcrew/registry.json" >/dev/null
+}
+
+test_6b_reconcile_inside_bx_is_noop() {
+  local d before after
+  d="$(new_test_dir 6b)"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register claudio --paneId 11 --sessionId s11 --agent claude --cwd "$d" --pid 11 --status alive >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register sam --paneId 12 --sessionId s12 --agent codex --cwd "$d" --pid 12 --status alive >/dev/null 2>&1 || return 1
+  before="$(sha256sum "$d/.zcrew/registry.json")" || return 1
+
+  (
+    cd "$d" || exit 1
+    BX_INSIDE=1 "$ZCREW_BIN" sync >/dev/null 2>&1
+  ) || return 1
+  after="$(sha256sum "$d/.zcrew/registry.json")" || return 1
+
+  [[ "$before" == "$after" ]]
+}
+
+test_6c_sync_prune_empty_live_set_warns_and_preserves_registry() {
+  local d mockbin out before after
+  d="$(new_test_dir 6c)"
+  mockbin="$d/mock-bin"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register claudio --paneId 11 --sessionId s11 --agent claude --cwd "$d" --pid 11 --status alive >/dev/null 2>&1 || return 1
+  before="$(sha256sum "$d/.zcrew/registry.json")" || return 1
+  make_mock_zellij "$mockbin" ""
+
+  out="$(
+    cd "$d" || exit 1
+    env -u BX_INSIDE PATH="$mockbin:$PATH" "$ZCREW_BIN" sync 2>&1
+  )" || return 1
+  after="$(sha256sum "$d/.zcrew/registry.json")" || return 1
+
+  [[ "$before" == "$after" ]] || return 1
+  printf '%s\n' "$out" | grep -Fxq 'warning: zellij returned no live panes; preserving non-empty registry'
+}
+
+test_6d_sync_prune_preserves_named_aliases_for_live_panes() {
+  local d mockbin
+  d="$(new_test_dir 6d)"
+  mockbin="$d/mock-bin"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register claudio --paneId 11 --sessionId s11 --agent claude --cwd "$d" --pid 11 --status alive >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register sam --paneId 12 --sessionId s12 --agent codex --cwd "$d" --pid 12 --status alive >/dev/null 2>&1 || return 1
+  make_mock_zellij "$mockbin" $'terminal_11\nterminal_12'
+
+  (
+    cd "$d" || exit 1
+    env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_ZELLIJ_LIST_OUTPUT=$'terminal_11\nterminal_12' "$ZCREW_BIN" sync >/dev/null 2>&1
+  ) || return 1
+
+  jq -e '
+    (.panes.claudio.paneId == "11") and
+    (.panes.sam.paneId == "12") and
+    (.panes | has("pane-11") | not) and
+    (.panes | has("pane-12") | not)
+  ' "$d/.zcrew/registry.json" >/dev/null
 }
 
 test_7_placeholder_promotion_no_duplicate() {
@@ -585,7 +646,7 @@ test_10_sync_no_prune_marks_stale_not_delete() {
 
   (
     cd "$d" || exit 1
-    PATH="$mockbin:$PATH" MOCK_ZELLIJ_LIST_OUTPUT='terminal_123' "$ZCREW_BIN" sync --keep-stale >/dev/null 2>&1
+    env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_ZELLIJ_LIST_OUTPUT='terminal_123' "$ZCREW_BIN" sync --keep-stale >/dev/null 2>&1
   ) || return 1
 
   jq -e '.panes | has("stale") and has("live")' "$d/.zcrew/registry.json" >/dev/null || return 1
@@ -661,8 +722,8 @@ test_11c_spawn_allows_name_after_pruning_stale_entry() {
 
   out="$(
     cd "$d" || exit 1
-    PATH="$mockbin:$PATH" MOCK_ZELLIJ_ARGS_FILE="$args_file" \
-      MOCK_ZELLIJ_LIST_OUTPUT='' MOCK_ZELLIJ_NEW_PANE_OUTPUT='terminal_777' \
+    env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_ZELLIJ_ARGS_FILE="$args_file" \
+      MOCK_ZELLIJ_LIST_OUTPUT='terminal_0' MOCK_ZELLIJ_NEW_PANE_OUTPUT='terminal_777' \
       ZELLIJ_SESSION_NAME='test-session' "$ZCREW_BIN" spawn claude buddy 2>&1
   )" || return 1
 
@@ -1212,15 +1273,15 @@ test_21_list_auto_sync_prunes_dead_entries() {
   zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
   jq '.panes = {dead:{paneId:"999",sessionId:"s",agent:"claude",cwd:"x",pid:1,lastSeen:1,status:"alive"}}' "$d/.zcrew/registry.json" > "$d/.zcrew/registry.json.tmp" || return 1
   mv "$d/.zcrew/registry.json.tmp" "$d/.zcrew/registry.json"
-  make_mock_zellij "$mockbin" ""
+  make_mock_zellij "$mockbin" "terminal_123"
 
   out="$(
     cd "$d" || exit 1
-    ZCREW_AUTO_SYNC=1 PATH="$mockbin:$PATH" "$ZCREW_BIN" list --json
+    env -u BX_INSIDE ZCREW_AUTO_SYNC=1 PATH="$mockbin:$PATH" MOCK_ZELLIJ_LIST_OUTPUT='terminal_123' "$ZCREW_BIN" list --json
   )" || return 1
 
-  printf '%s\n' "$out" | jq -e '.panes.dead == null' >/dev/null || return 1
-  jq -e '.panes.dead == null' "$d/.zcrew/registry.json" >/dev/null
+  printf '%s\n' "$out" | jq -e '.panes.dead == null and .panes["pane-123"].paneId == "123"' >/dev/null || return 1
+  jq -e '.panes.dead == null and .panes["pane-123"].paneId == "123"' "$d/.zcrew/registry.json" >/dev/null
 }
 
 test_22_list_env_opt_out_preserves_fixture() {
@@ -1252,7 +1313,7 @@ test_23_spawn_implicit_sync_registers_existing_live_pane() {
 
   if (
     cd "$d" || exit 1
-    ZCREW_AUTO_SYNC=1 PATH="$mockbin:$PATH" MOCK_ZELLIJ_LIST_OUTPUT="terminal_123" ZELLIJ_SESSION_NAME="test-session" ZELLIJ_PANE_ID="0" "$ZCREW_BIN" spawn claude buddy >/dev/null 2>&1
+    env -u BX_INSIDE ZCREW_AUTO_SYNC=1 PATH="$mockbin:$PATH" MOCK_ZELLIJ_LIST_OUTPUT="terminal_123" ZELLIJ_SESSION_NAME="test-session" ZELLIJ_PANE_ID="0" "$ZCREW_BIN" spawn claude buddy >/dev/null 2>&1
   ); then
     return 1
   fi
@@ -1272,7 +1333,7 @@ test_24_sync_keep_stale_preserves_entries() {
 
   out="$(
     cd "$d" || exit 1
-    PATH="$mockbin:$PATH" "$ZCREW_BIN" sync --keep-stale
+    env -u BX_INSIDE PATH="$mockbin:$PATH" "$ZCREW_BIN" sync --keep-stale
   )" || return 1
 
   [[ "$out" == "synced" ]] || return 1
@@ -2666,6 +2727,9 @@ main() {
   run_test "4) list outside zcrew project fails hard" test_4_list_outside_project_fails_hard
   run_test "5) parallel register keeps all entries" test_5_parallel_register_all_present
   run_test "6) sync --prune removes stale entries with mocked zellij" test_6_sync_prune_with_mocked_zellij
+  run_test "6b) sync inside bx is a no-op" test_6b_reconcile_inside_bx_is_noop
+  run_test "6c) sync prune empty live set warns and preserves registry" test_6c_sync_prune_empty_live_set_warns_and_preserves_registry
+  run_test "6d) sync prune preserves named aliases for live panes" test_6d_sync_prune_preserves_named_aliases_for_live_panes
   # SKIP 7: placeholder promotion is for a later step (cmd_spawn currently minimal)
   # run_test "7) placeholder promotion leaves only main" test_7_placeholder_promotion_no_duplicate
   run_test "9) send calls tell with paneId and message" test_9_send_calls_tell_with_expected_args
