@@ -2635,14 +2635,39 @@ test_81b_verify_managed_copy_warns_on_mismatch() {
 }
 
 test_81c_install_continues_when_verify_managed_copy_warns() {
-  local d out
+  local d src_repo lib_copy target out
   d="$(new_test_dir 81c)"
-  mkdir -p "$d/.claude/skills/zspawn"
-  printf 'user-overwrite\n' > "$d/.claude/skills/zspawn/SKILL.md"
+  src_repo="$d/src-repo"
+  lib_copy="$src_repo/.zcrew/bin/zcrew"
+  target="$d/target"
+  mkdir -p "$src_repo/.zcrew/bin" "$target"
+  cp -r "$REPO_ROOT/.zcrew/lib" "$src_repo/.zcrew/" || return 1
+  cp "$REPO_ROOT/.zcrew/bin/bx" "$src_repo/.zcrew/bin/bx" || return 1
+  cp "$REPO_ROOT/.zcrew/bin/ix" "$src_repo/.zcrew/bin/ix" || return 1
+  cp -r "$REPO_ROOT/.agents" "$src_repo/" || return 1
+  cp -r "$REPO_ROOT/.claude" "$src_repo/" || return 1
+  cp -r "$REPO_ROOT/.pi" "$src_repo/" || return 1
+  cp -r "$REPO_ROOT/.codex" "$src_repo/" || return 1
+  cp "$REPO_ROOT/AGENTS.md" "$src_repo/AGENTS.md" || return 1
+  source_zcrew_lib "$lib_copy"
 
-  out="$(zcrew_cmd "$TEST_ROOT" install "$d" 2>&1)" || return 1
+  out="$(bash -c '
+    set -euo pipefail
+    source "$1"
+    verify_managed_copy() {
+      echo "warning: managed skill path was overwritten after install: .claude/skills/zspawn/SKILL.md" >&2
+      echo "warning: some managed skill files do not match installed source content; investigate target post-install tooling" >&2
+      return 1
+    }
+    unset BX_INSIDE
+    ZCREW_AUTO_SYNC=0
+    cmd_install "$2"
+  ' bash "$lib_copy" "$target" 2>&1)" || return 1
+
+  printf '%s\n' "$out" | grep -Fxq 'warning: managed skill path was overwritten after install: .claude/skills/zspawn/SKILL.md' || return 1
+  printf '%s\n' "$out" | grep -Fxq 'warning: some managed skill files do not match installed source content; investigate target post-install tooling' || return 1
   printf '%s\n' "$out" | grep -Fxq '    .claude/skills/zspawn' || return 1
-  [[ -f "$d/.claude/skills/zspawn/SKILL.md" ]]
+  [[ -f "$target/.claude/skills/zspawn/SKILL.md" ]]
 }
 
 test_82_install_mount_block_rewrite_is_idempotent() {
