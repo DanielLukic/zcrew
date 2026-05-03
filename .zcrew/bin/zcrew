@@ -836,7 +836,7 @@ install_bootstrap() {
 verify_managed_copy() {
   local src_dir="$1"
   local dst_dir="$2"
-  local src_abs dst_abs rel mismatched=0 summary=0
+  local src_abs dst_abs rel mismatched=0
   src_abs="$(realpath "$src_dir")"
   dst_abs="$(realpath "$dst_dir")"
 
