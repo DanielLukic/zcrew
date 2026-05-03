@@ -807,7 +807,8 @@ test_11f_spawn_seeds_missing_managed_mounts() {
   [[ -f "$d/.bx/mounts" ]] || return 1
   grep -Fqx '# zcrew-managed begin' "$d/.bx/mounts" || return 1
   grep -Fqx "$zellij_sock $zellij_sock rw" "$d/.bx/mounts" || return 1
-  grep -Fqx "$target_abs/.zcrew $target_abs/.zcrew ro" "$d/.bx/mounts" || return 1
+  grep -Fqx "$target_abs/.zcrew/bin $target_abs/.zcrew/bin ro" "$d/.bx/mounts" || return 1
+  grep -Fqx "$target_abs/.zcrew/lib $target_abs/.zcrew/lib ro" "$d/.bx/mounts" || return 1
   grep -Fqx "$target_abs/.config/mise.toml $target_abs/.config/mise.toml ro" "$d/.bx/mounts"
 }
 
@@ -844,7 +845,8 @@ EOF
   printf '%s\n' "$out" | grep -Fq 'spawned: healer2 (claude) pane=558' || return 1
   grep -Fqx "$custom_src $custom_dst ro" "$d/.bx/mounts" || return 1
   grep -Fqx "$zellij_sock $zellij_sock rw" "$d/.bx/mounts" || return 1
-  grep -Fqx "$target_abs/.zcrew $target_abs/.zcrew ro" "$d/.bx/mounts" || return 1
+  grep -Fqx "$target_abs/.zcrew/bin $target_abs/.zcrew/bin ro" "$d/.bx/mounts" || return 1
+  grep -Fqx "$target_abs/.zcrew/lib $target_abs/.zcrew/lib ro" "$d/.bx/mounts" || return 1
   grep -Fqx "$target_abs/.config/mise.toml $target_abs/.config/mise.toml ro" "$d/.bx/mounts" || return 1
   [[ "$(grep -Fxc '# zcrew-managed begin' "$d/.bx/mounts")" -eq 1 ]]
 }
@@ -2669,18 +2671,34 @@ test_82d_install_mount_block_includes_managed_bx_files_ro() {
   grep -Fqx "$target_abs/.bx/home/.config/git/ignore $sandbox_home/.config/git/ignore ro" "$d/.bx/mounts"
 }
 
-test_83_bx_ro_mount_blocks_zcrew_deletion_but_home_stays_writable() {
-  local d host_home out
+test_83_bx_ro_mount_blocks_zcrew_bin_and_lib_but_runtime_state_stays_writable() {
+  local d host_home
   d="$(new_test_dir 83)"
   host_home="$d/host-home"
   mkdir -p "$d" "$host_home"
 
   zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
-  out="$(cd "$d" && env -u BX_INSIDE HOME="$host_home" TERM="${TERM:-xterm-256color}" "$REPO_ROOT/.zcrew/bin/bx" run bash -lc 'touch ~/.writable && rm -rf .zcrew' 2>&1 || true)"
+  (cd "$d" && env -u BX_INSIDE HOME="$host_home" TERM="${TERM:-xterm-256color}" "$d/.zcrew/bin/bx" run bash -lc '
+    set +e
+    failures=0
+    rm -f .zcrew/bin/zcrew >/dev/null 2>&1
+    status_bin_rm=$?
+    rm -f .zcrew/lib/tell >/dev/null 2>&1
+    status_lib_rm=$?
+    printf runtime-audit >> .zcrew/audit.log || failures=1
+    printf "{\"ok\":true}\n" > .zcrew/registry.json || failures=1
+    touch ~/.writable || failures=1
+    if [[ $status_bin_rm -eq 0 || $status_lib_rm -eq 0 ]]; then
+      failures=1
+    fi
+    exit $failures
+  ' >/dev/null 2>&1) || return 1
 
   [[ -e "$d/.zcrew/bin/zcrew" ]] || return 1
-  [[ -f "$d/.bx/home/.writable" ]] || return 1
-  printf '%s\n' "$out" | grep -Eiq 'Read-only file system|Permission denied'
+  [[ -e "$d/.zcrew/lib/tell" ]] || return 1
+  grep -Fq 'runtime-audit' "$d/.zcrew/audit.log" || return 1
+  grep -Fxq '{"ok":true}' "$d/.zcrew/registry.json" || return 1
+  [[ -f "$d/.bx/home/.writable" ]]
 }
 
 test_83b_bx_ro_mount_blocks_managed_bx_files_but_home_stays_writable() {
@@ -2853,7 +2871,7 @@ main() {
   run_test "82b) install preserves corrupt mount markers with warning" test_82b_install_preserves_corrupt_mount_markers_with_warning
   run_test "82c) install preserves misordered mount markers with warning" test_82c_install_preserves_misordered_mount_markers_with_warning
   run_test "82d) install mount block includes managed bx files ro" test_82d_install_mount_block_includes_managed_bx_files_ro
-  run_test "83) bx RO mount blocks .zcrew deletion while HOME stays writable" test_83_bx_ro_mount_blocks_zcrew_deletion_but_home_stays_writable
+  run_test "83) bx RO mount blocks .zcrew bin/lib while runtime state stays writable" test_83_bx_ro_mount_blocks_zcrew_bin_and_lib_but_runtime_state_stays_writable
   run_test "83b) bx RO mount blocks managed bx files while HOME stays writable" test_83b_bx_ro_mount_blocks_managed_bx_files_but_home_stays_writable
 
   echo ""
