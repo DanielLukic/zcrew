@@ -1320,6 +1320,10 @@ cmd_send() {
 
   if ! live_pane_ids | grep -qFx "$pane_id"; then
     logger "send" "warn" "stale pane name=$name paneId=$pane_id"
+    if [[ -n "${BX_INSIDE:-}" && "$name" == "main" ]]; then
+      echo 'zcrew: no live main registered. Ask the user to run "zcrew claim" in the orchestrator pane.' >&2
+      exit 1
+    fi
     print_stale_send_error "$name" "$pane_id" "$(lookup_registered_agent "$name")"
     exit 1
   fi
