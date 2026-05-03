@@ -2616,17 +2616,33 @@ EOF
 }
 
 test_81b_verify_managed_copy_warns_on_mismatch() {
-  local d lib_copy out
+  local d lib_copy out rc
   d="$(new_test_dir 81b)"
   lib_copy="$d/zcrew-lib.sh"
-  mkdir -p "$d/src/tree" "$d/dst/tree"
+  mkdir -p "$d/src/tree/sub" "$d/dst/tree/sub"
   printf 'one\n' > "$d/src/tree/SKILL.md"
-  printf 'two\n' > "$d/dst/tree/SKILL.md"
+  printf 'nested-good\n' > "$d/src/tree/sub/extra.txt"
+  cp "$d/src/tree/SKILL.md" "$d/dst/tree/SKILL.md"
+  printf 'nested-bad\n' > "$d/dst/tree/sub/extra.txt"
   source_zcrew_lib "$lib_copy"
 
-  out="$(cd "$d" && bash -c 'set -euo pipefail; source "$1"; verify_managed_copy "$2" "$3"' bash "$lib_copy" "$d/src/tree" "$d/dst/tree" 2>&1 || true)"
-  printf '%s\n' "$out" | grep -Fxq 'warning: managed skill path was overwritten after install: dst/tree/SKILL.md' || return 1
+  out="$(cd "$d" && bash -c 'set -euo pipefail; source "$1"; verify_managed_copy "$2" "$3"' bash "$lib_copy" "$d/src/tree" "$d/dst/tree" 2>&1; rc=$?; printf '\n__RC__=%s\n' "$rc")"
+  rc="$(printf '%s\n' "$out" | sed -n 's/^__RC__=//p' | tail -n1)"
+  out="$(printf '%s\n' "$out" | sed '/^__RC__=/d')"
+  [[ "$rc" == "1" ]] || return 1
+  printf '%s\n' "$out" | grep -Fxq 'warning: managed skill path was overwritten after install: dst/tree/sub/extra.txt' || return 1
   printf '%s\n' "$out" | grep -Fxq 'warning: some managed skill files do not match installed source content; investigate target post-install tooling'
+}
+
+test_81c_install_continues_when_verify_managed_copy_warns() {
+  local d out
+  d="$(new_test_dir 81c)"
+  mkdir -p "$d/.claude/skills/zspawn"
+  printf 'user-overwrite\n' > "$d/.claude/skills/zspawn/SKILL.md"
+
+  out="$(zcrew_cmd "$TEST_ROOT" install "$d" 2>&1)" || return 1
+  printf '%s\n' "$out" | grep -Fxq '    .claude/skills/zspawn' || return 1
+  [[ -f "$d/.claude/skills/zspawn/SKILL.md" ]]
 }
 
 test_82_install_mount_block_rewrite_is_idempotent() {
@@ -2904,6 +2920,7 @@ main() {
   run_test "80) upgrade preserves bx file with incomplete fallback marker" test_80_upgrade_preserves_bx_with_incomplete_fallback_marker
   run_test "81) upgrade preserves launcher with mismatched header" test_81_upgrade_preserves_launcher_with_mismatched_header
   run_test "81b) verify_managed_copy warns on mismatch" test_81b_verify_managed_copy_warns_on_mismatch
+  run_test "81c) install continues when verify_managed_copy warns" test_81c_install_continues_when_verify_managed_copy_warns
   run_test "82) install mount block rewrite is idempotent" test_82_install_mount_block_rewrite_is_idempotent
   run_test "82b) install preserves corrupt mount markers with warning" test_82b_install_preserves_corrupt_mount_markers_with_warning
   run_test "82c) install preserves misordered mount markers with warning" test_82c_install_preserves_misordered_mount_markers_with_warning
