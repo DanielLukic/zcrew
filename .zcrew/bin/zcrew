@@ -833,6 +833,28 @@ install_bootstrap() {
 
 # Install zcrew into a target project directory.
 # Copies .zcrew-owned bin/lib content plus skills and managed config.
+verify_managed_copy() {
+  local src_dir="$1"
+  local dst_dir="$2"
+  local src_abs dst_abs rel mismatched=0 summary=0
+  src_abs="$(realpath "$src_dir")"
+  dst_abs="$(realpath "$dst_dir")"
+
+  while IFS= read -r -d '' src_path; do
+    rel="${src_path#$src_abs/}"
+    if [[ ! -f "$dst_abs/$rel" ]] || ! cmp -s "$src_path" "$dst_abs/$rel"; then
+      echo "warning: managed skill path was overwritten after install: ${dst_dir#$PROJECT_DIR/}/$rel" >&2
+      mismatched=1
+    fi
+  done < <(find -L "$src_abs" -type f -print0)
+
+  if [[ "$mismatched" == "1" ]]; then
+    echo "warning: some managed skill files do not match installed source content; investigate target post-install tooling" >&2
+    return 1
+  fi
+  return 0
+}
+
 cmd_install() {
   CURRENT_SUBCMD="install"
   local target=""
@@ -896,27 +918,31 @@ cmd_install() {
   echo "    .zcrew/bin/{zcrew,bx,ix}"
   echo "    .zcrew/lib/{tell,launchers/*}"
 
-  # Canonical cross-tool skill first so copied symlinks resolve in-target.
+  # Canonical cross-tool skill first; copy with -L so source symlinks become real content in-target.
   mkdir -p "$target/.agents/skills"
   rm -rf "$target/.agents/skills/zcrew"
-  cp -r "$src/.agents/skills/zcrew" "$target/.agents/skills/"
+  cp -rL "$src/.agents/skills/zcrew" "$target/.agents/skills/"
+  verify_managed_copy "$src/.agents/skills/zcrew" "$target/.agents/skills/zcrew" || true
   echo "    .agents/skills/zcrew"
 
   mkdir -p "$target/.claude/skills"
   for skill in zspawn zsend zpanes zsync zname zclose zcrew; do
     rm -rf "$target/.claude/skills/$skill"
-    cp -r "$src/.claude/skills/$skill" "$target/.claude/skills/"
+    cp -rL "$src/.claude/skills/$skill" "$target/.claude/skills/"
+    verify_managed_copy "$src/.claude/skills/$skill" "$target/.claude/skills/$skill" || true
     echo "    .claude/skills/$skill"
   done
   mkdir -p "$target/.pi/skills"
   for skill in zspawn zsend zpanes zsync zname zclose zcrew; do
     rm -rf "$target/.pi/skills/$skill"
-    cp -r "$src/.pi/skills/$skill" "$target/.pi/skills/"
+    cp -rL "$src/.pi/skills/$skill" "$target/.pi/skills/"
+    verify_managed_copy "$src/.pi/skills/$skill" "$target/.pi/skills/$skill" || true
     echo "    .pi/skills/$skill"
   done
   mkdir -p "$target/.codex/skills"
   rm -rf "$target/.codex/skills/zcrew"
-  cp -r "$src/.codex/skills/zcrew" "$target/.codex/skills/"
+  cp -rL "$src/.codex/skills/zcrew" "$target/.codex/skills/"
+  verify_managed_copy "$src/.codex/skills/zcrew" "$target/.codex/skills/zcrew" || true
   echo "    .codex/skills/zcrew"
 
   if [[ -f "$target/AGENTS.md" ]]; then
