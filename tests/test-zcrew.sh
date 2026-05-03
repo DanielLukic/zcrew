@@ -1458,8 +1458,8 @@ test_31_install_writes_pi_skills() {
   for skill in zcrew zspawn zsend zpanes zsync zname zclose; do
     [[ -f "$d/.pi/skills/$skill/SKILL.md" ]] || return 1
   done
-  [[ -L "$d/.pi/skills/zcrew" ]] || return 1
-  [[ "$(readlink "$d/.pi/skills/zcrew")" == "../../.agents/skills/zcrew" ]]
+  [[ -d "$d/.pi/skills/zcrew" ]] || return 1
+  [[ ! -L "$d/.pi/skills/zcrew" ]]
 }
 
 test_32_second_install_overwrites_pi_skills_with_latest_content() {
@@ -1530,12 +1530,9 @@ test_34b_install_writes_cross_tool_zcrew_skill_layout() {
   zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
 
   [[ -f "$d/.agents/skills/zcrew/SKILL.md" ]] || return 1
-  [[ -L "$d/.claude/skills/zcrew" ]] || return 1
-  [[ "$(readlink "$d/.claude/skills/zcrew")" == "../../.agents/skills/zcrew" ]] || return 1
-  [[ -L "$d/.codex/skills/zcrew" ]] || return 1
-  [[ "$(readlink "$d/.codex/skills/zcrew")" == "../../.agents/skills/zcrew" ]] || return 1
-  [[ -L "$d/.pi/skills/zcrew" ]] || return 1
-  [[ "$(readlink "$d/.pi/skills/zcrew")" == "../../.agents/skills/zcrew" ]] || return 1
+  [[ -d "$d/.claude/skills/zcrew" && ! -L "$d/.claude/skills/zcrew" ]] || return 1
+  [[ -d "$d/.codex/skills/zcrew" && ! -L "$d/.codex/skills/zcrew" ]] || return 1
+  [[ -d "$d/.pi/skills/zcrew" && ! -L "$d/.pi/skills/zcrew" ]] || return 1
   cmp -s "$d/.agents/skills/zcrew/SKILL.md" "$d/.claude/skills/zcrew/SKILL.md" || return 1
   cmp -s "$d/.agents/skills/zcrew/SKILL.md" "$d/.codex/skills/zcrew/SKILL.md" || return 1
   cmp -s "$d/.agents/skills/zcrew/SKILL.md" "$d/.pi/skills/zcrew/SKILL.md"
@@ -1554,6 +1551,23 @@ test_34c_second_install_overwrites_codex_skill_with_latest_content() {
 
   ! grep -Fxq "$marker" "$d/.codex/skills/zcrew/SKILL.md" || return 1
   cmp -s "$REPO_ROOT/.agents/skills/zcrew/SKILL.md" "$d/.codex/skills/zcrew/SKILL.md"
+}
+
+test_34c_install_materializes_zcrew_skill_symlinks_as_real_dirs() {
+  local d
+  d="$(new_test_dir 34c-symlink)"
+  mkdir -p "$d/.agents"
+  ln -s ../docs/skills "$d/.agents/skills"
+  mkdir -p "$d/docs/skills"
+
+  zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
+
+  [[ -d "$d/.codex/skills/zcrew" && ! -L "$d/.codex/skills/zcrew" ]] || return 1
+  [[ -d "$d/.pi/skills/zcrew" && ! -L "$d/.pi/skills/zcrew" ]] || return 1
+  [[ -d "$d/.claude/skills/zcrew" && ! -L "$d/.claude/skills/zcrew" ]] || return 1
+  cmp -s "$REPO_ROOT/.agents/skills/zcrew/SKILL.md" "$d/.codex/skills/zcrew/SKILL.md" || return 1
+  cmp -s "$REPO_ROOT/.agents/skills/zcrew/SKILL.md" "$d/.pi/skills/zcrew/SKILL.md" || return 1
+  cmp -s "$REPO_ROOT/.agents/skills/zcrew/SKILL.md" "$d/.claude/skills/zcrew/SKILL.md"
 }
 
 test_34d_codex_skill_frontmatter_sanity() {
@@ -2601,6 +2615,20 @@ EOF
   printf '%s\n' "$out" | grep -Fq 'warning: cannot verify lib/zcrew/launchers/codex.sh is zcrew-owned; remove manually if you don'"'"'t need it:'
 }
 
+test_81b_verify_managed_copy_warns_on_mismatch() {
+  local d lib_copy out
+  d="$(new_test_dir 81b)"
+  lib_copy="$d/zcrew-lib.sh"
+  mkdir -p "$d/src/tree" "$d/dst/tree"
+  printf 'one\n' > "$d/src/tree/SKILL.md"
+  printf 'two\n' > "$d/dst/tree/SKILL.md"
+  source_zcrew_lib "$lib_copy"
+
+  out="$(cd "$d" && bash -c 'set -euo pipefail; source "$1"; verify_managed_copy "$2" "$3"' bash "$lib_copy" "$d/src/tree" "$d/dst/tree" 2>&1 || true)"
+  printf '%s\n' "$out" | grep -Fxq 'warning: managed skill path was overwritten after install: dst/tree/SKILL.md' || return 1
+  printf '%s\n' "$out" | grep -Fxq 'warning: some managed skill files do not match installed source content; investigate target post-install tooling'
+}
+
 test_82_install_mount_block_rewrite_is_idempotent() {
   local d first second
   d="$(new_test_dir 82)"
@@ -2810,8 +2838,9 @@ main() {
   run_test "32b) install writes .zcrew/lib/tell" test_32b_install_writes_internal_tell_binary
   run_test "33) install does not write host ~/.pi or ~/.agents" test_33_install_does_not_write_host_pi_dirs
   run_test "34) installed .pi skills have valid required frontmatter" test_34_pi_skill_frontmatter_sanity
-  run_test "34b) install writes canonical .agents zcrew skill plus symlinked codex/pi views" test_34b_install_writes_cross_tool_zcrew_skill_layout
+  run_test "34b) install writes canonical .agents zcrew skill plus copied codex/pi/claude views" test_34b_install_writes_cross_tool_zcrew_skill_layout
   run_test "34c) second install overwrites .codex zcrew skill" test_34c_second_install_overwrites_codex_skill_with_latest_content
+  run_test "34c-symlink) install materializes zcrew skill symlinks as real dirs" test_34c_install_materializes_zcrew_skill_symlinks_as_real_dirs
   run_test "34d) installed .codex zcrew skill has simplified frontmatter" test_34d_codex_skill_frontmatter_sanity
   run_test "34e) install writes AGENTS.md and CLAUDE.md symlink when both are missing" test_34e_install_seeds_agents_and_claude_symlink_when_both_missing
   run_test "34f) install skips AGENTS.md and CLAUDE.md when AGENTS.md already exists" test_34f_install_skips_agents_and_claude_when_agents_exists
@@ -2874,6 +2903,7 @@ main() {
   run_test "79) upgrade removes header-owned forward-compat file" test_79_upgrade_removes_header_owned_forward_compat_file
   run_test "80) upgrade preserves bx file with incomplete fallback marker" test_80_upgrade_preserves_bx_with_incomplete_fallback_marker
   run_test "81) upgrade preserves launcher with mismatched header" test_81_upgrade_preserves_launcher_with_mismatched_header
+  run_test "81b) verify_managed_copy warns on mismatch" test_81b_verify_managed_copy_warns_on_mismatch
   run_test "82) install mount block rewrite is idempotent" test_82_install_mount_block_rewrite_is_idempotent
   run_test "82b) install preserves corrupt mount markers with warning" test_82b_install_preserves_corrupt_mount_markers_with_warning
   run_test "82c) install preserves misordered mount markers with warning" test_82c_install_preserves_misordered_mount_markers_with_warning
