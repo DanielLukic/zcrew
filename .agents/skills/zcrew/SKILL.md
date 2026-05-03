@@ -23,6 +23,9 @@ Closes a registered pane and unregisters it.
 `zcrew rename <old> <new>`
 Renames a registered pane entry.
 
+`zcrew claim [--replace]`
+Registers the calling pane as `main` in the registry. Run this on session start in your orchestrator pane so workers can reply to you. Idempotent if you are already main. Errors if a different live pane is main; use `--replace` to take over intentionally.
+
 `zcrew list`
 Prints the current pane registry as JSON. Human users can also run `/zpanes`.
 
@@ -42,7 +45,9 @@ You discuss, plan, delegate, and verify. You do not implement directly. Your job
 ### Orchestrator rules
 
 When a worker needs to report back to main, use `zcrew reply "<message>"`.
+If a worker reports `no main registered` or `no live main registered`, run `zcrew claim` in your orchestrator pane, then have the worker retry the reply.
 
+- **Run `zcrew claim` on session start** — registers your pane as `main` so workers can reply. Idempotent when you are already main.
 - **Never implement in the master pane** — always dispatch to a team member.
 - **Never ack in circles** — if an agent reports progress, don't echo it back. Only respond when you have new information, a decision, or a correction. Silence is fine.
 - **Brief clearly** — every dispatch must include: what to do, why, constraints, expected deliverable format. A vague brief produces vague work.
