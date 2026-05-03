@@ -688,6 +688,8 @@ cmd_spawn() {
   require_zellij_session
   require_project
 
+  claim_main_for_send >/dev/null
+
   local existing_pane
   existing_pane=$(jq -r --arg n "$name" '.panes[$n].paneId // empty' "$REGISTRY_FILE")
   if [[ -n "$existing_pane" ]]; then
@@ -1031,14 +1033,29 @@ resolve_sender_name_readonly() {
   ' "$REGISTRY_FILE"
 }
 
-claim_main_for_send() {
+lookup_live_main_info() {
   require_project
   ensure_registry_files
 
-  if [[ -n "${BX_INSIDE:-}" ]]; then
-    resolve_sender_name_readonly
-    return 0
-  fi
+  local live_json
+  live_json=$(live_pane_ids | jq -Rsc 'split("\n") | map(select(length>0))')
+
+  jq -r --argjson live "$live_json" '
+    (.panes.main // null) as $main
+    | if $main == null then
+        empty
+      elif ($live | index($main.paneId // "")) == null then
+        empty
+      else
+        "main\t" + ($main.paneId // "")
+      end
+  ' "$REGISTRY_FILE"
+}
+
+claim_main_alias() {
+  local force_replace="${1:-false}"
+  require_project
+  ensure_registry_files
 
   local pane_id="${ZELLIJ_PANE_ID:-}"
   [[ -n "$pane_id" ]] || pane_id="0"
@@ -1050,7 +1067,7 @@ claim_main_for_send() {
   registry_write_jq '
     .version = 1
     | .panes = (.panes // {})
-    | if ((.panes.main.paneId // "") as $mainPaneId | ($live | index($mainPaneId)) == null) then
+    | if ($force == "true") or (((.panes.main.paneId // "") as $mainPaneId | ($live | index($mainPaneId)) == null)) then
         ((.panes
           | to_entries
           | map(select((.value.paneId // "") == $paneId))
@@ -1075,11 +1092,27 @@ claim_main_for_send() {
         .
       end
   ' \
+    --arg force "$force_replace" \
     --arg paneId "$pane_id" \
     --arg cwd "$PWD" \
     --arg pid "$$" \
     --arg now "$now" \
     --argjson live "$live_json"
+}
+
+claim_main_for_send() {
+  require_project
+  ensure_registry_files
+
+  if [[ -n "${BX_INSIDE:-}" ]]; then
+    resolve_sender_name_readonly
+    return 0
+  fi
+
+  local pane_id="${ZELLIJ_PANE_ID:-}"
+  [[ -n "$pane_id" ]] || return 0
+
+  claim_main_alias false
 }
 
 lookup_registered_pane_id() {
@@ -1267,7 +1300,11 @@ cmd_send() {
   pane_id=$(lookup_registered_pane_id "$name")
   if [[ -z "$pane_id" ]]; then
     logger "send" "error" "unknown name=$name"
-    echo "zcrew: unknown pane name '$name'" >&2
+    if [[ -n "${BX_INSIDE:-}" && "$name" == "main" ]]; then
+      echo 'zcrew: no main registered. Ask the user to run "zcrew claim" in the orchestrator pane.' >&2
+    else
+      echo "zcrew: unknown pane name '$name'" >&2
+    fi
     exit 1
   fi
 
@@ -1320,6 +1357,51 @@ cmd_reply() {
   fi
   [[ $# -gt 0 ]] || { echo "Usage: zcrew reply <message>" >&2; exit 1; }
   cmd_send main "$@"
+}
+
+cmd_claim() {
+  CURRENT_SUBCMD="claim"
+
+  if [[ -n "${BX_INSIDE:-}" ]]; then
+    echo "zcrew claim is host-only; run it in the orchestrator pane." >&2
+    exit 1
+  fi
+  if [[ -z "${ZELLIJ_PANE_ID:-}" || -z "${ZELLIJ_SESSION_NAME:-}" ]]; then
+    echo "zcrew: claim must be run inside a zellij pane" >&2
+    exit 1
+  fi
+
+  require_project
+  ensure_registry_files
+  require_zellij_session
+
+  local replace=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --replace) replace=true ;;
+      *) echo "Usage: zcrew claim [--replace]" >&2; exit 1 ;;
+    esac
+    shift
+  done
+
+  local pane_id="$ZELLIJ_PANE_ID"
+  local live_main_info live_main_name live_main_pane
+  live_main_info="$(lookup_live_main_info)"
+  if [[ -n "$live_main_info" ]]; then
+    IFS=$'\t' read -r live_main_name live_main_pane <<< "$live_main_info"
+    if [[ "$live_main_pane" == "$pane_id" ]]; then
+      return 0
+    fi
+    if [[ "$replace" != "true" ]]; then
+      echo "zcrew: main is already $live_main_name (paneId $live_main_pane). Use --replace to swap." >&2
+      exit 1
+    fi
+    echo "replacing main: $live_main_name (paneId $live_main_pane)"
+    claim_main_alias true
+    return 0
+  fi
+
+  claim_main_alias false
 }
 
 cmd_list() {
@@ -1424,6 +1506,7 @@ main() {
     spawn) dispatch_registry_command cmd_spawn "$@" ;;
     send) dispatch_registry_command cmd_send "$@" ;;
     reply) dispatch_registry_command cmd_reply "$@" ;;
+    claim) dispatch_registry_command cmd_claim "$@" ;;
     list) dispatch_registry_command cmd_list "$@" ;;
     sync) cmd_sync "$@" ;;
     *)
@@ -1438,6 +1521,7 @@ Commands:
   close <name>
   send <name> <message>
   reply <message>
+  claim [--replace]
   list [--json]
   sync [--keep-stale|--prune]
   register <name> [--paneId X] [--sessionId Y] [--agent A] [--cwd P] [--pid N] [--status S]

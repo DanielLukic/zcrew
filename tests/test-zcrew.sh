@@ -788,6 +788,76 @@ EOF
   [[ "$(grep -Fxc '# zcrew-managed begin' "$d/.bx/mounts")" -eq 1 ]]
 }
 
+test_11h_spawn_claims_host_as_main_when_absent() {
+  local d mockbin args_file out
+  d="$(new_test_dir 11h)"
+  mockbin="$d/mock-bin"
+  args_file="$d/zellij-args.txt"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  mkdir -p "$d/.bx" "$d/.zcrew/lib/launchers"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$d/.zcrew/lib/launchers/claude.sh"
+  chmod +x "$d/.zcrew/lib/launchers/claude.sh"
+  make_mock_zellij_spawn "$mockbin" "$args_file"
+
+  out="$(
+    cd "$d" || exit 1
+    env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_ZELLIJ_ARGS_FILE="$args_file" \
+      MOCK_ZELLIJ_LIST_OUTPUT='terminal_42' MOCK_ZELLIJ_NEW_PANE_OUTPUT='terminal_559' \
+      ZELLIJ_SESSION_NAME='test-session' ZELLIJ_PANE_ID=42 "$ZCREW_BIN" spawn claude claimer 2>&1
+  )" || return 1
+
+  printf '%s\n' "$out" | grep -Fq 'spawned: claimer (claude) pane=559' || return 1
+  jq -e '.panes.main.paneId == "42" and .panes.claimer.paneId == "559"' "$d/.zcrew/registry.json" >/dev/null
+}
+
+test_11i_spawn_does_not_churn_when_live_main_exists() {
+  local d mockbin args_file before after
+  d="$(new_test_dir 11i)"
+  mockbin="$d/mock-bin"
+  args_file="$d/zellij-args.txt"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register main --paneId 50 --sessionId s50 --agent unknown --cwd "$d" --pid 50 --status alive >/dev/null 2>&1 || return 1
+  mkdir -p "$d/.bx" "$d/.zcrew/lib/launchers"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$d/.zcrew/lib/launchers/claude.sh"
+  chmod +x "$d/.zcrew/lib/launchers/claude.sh"
+  make_mock_zellij_spawn "$mockbin" "$args_file"
+  before="$(jq -c '.panes.main' "$d/.zcrew/registry.json")" || return 1
+
+  (
+    cd "$d" || exit 1
+    env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_ZELLIJ_ARGS_FILE="$args_file" \
+      MOCK_ZELLIJ_LIST_OUTPUT=$'terminal_50\nterminal_42' MOCK_ZELLIJ_NEW_PANE_OUTPUT='terminal_560' \
+      ZELLIJ_SESSION_NAME='test-session' ZELLIJ_PANE_ID=42 "$ZCREW_BIN" spawn claude extra >/dev/null 2>&1
+  ) || return 1
+  after="$(jq -c '.panes.main' "$d/.zcrew/registry.json")" || return 1
+
+  [[ "$before" == "$after" ]]
+}
+
+test_11j_spawn_outside_zellij_skips_claim_without_error() {
+  local d mockbin args_file
+  d="$(new_test_dir 11j)"
+  mockbin="$d/mock-bin"
+  args_file="$d/zellij-args.txt"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  mkdir -p "$d/.bx" "$d/.zcrew/lib/launchers"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$d/.zcrew/lib/launchers/claude.sh"
+  chmod +x "$d/.zcrew/lib/launchers/claude.sh"
+  make_mock_zellij_spawn "$mockbin" "$args_file"
+
+  (
+    cd "$d" || exit 1
+    PATH="$mockbin:$PATH" MOCK_ZELLIJ_ARGS_FILE="$args_file" \
+      MOCK_ZELLIJ_LIST_OUTPUT='' MOCK_ZELLIJ_NEW_PANE_OUTPUT='terminal_561' \
+      ZELLIJ_SESSION_NAME='test-session' "$ZCREW_BIN" spawn claude plain >/dev/null 2>&1
+  ) || return 1
+
+  jq -e '(.panes | has("main") | not) and .panes.plain.paneId == "561"' "$d/.zcrew/registry.json" >/dev/null
+}
+
 test_12_send_outside_project_fails_hard() {
   local d out
   d="$(new_test_dir 12)"
@@ -2225,6 +2295,121 @@ test_72_reply_from_worker_sends_to_main() {
   grep -Fq $'\tsend\tinfo\tentry name=main' "$d/.zcrew/audit.log"
 }
 
+test_72b_claim_with_no_main_registers_caller() {
+  local d mockbin out
+  d="$(new_test_dir 72b)"
+  mockbin="$d/mock-bin"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  prepare_send_test_tools "$d" "$mockbin" "$d/tell-args.txt" "42"
+
+  out="$(cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=42 "$ZCREW_BIN" claim 2>&1)" || return 1
+  [[ -z "$out" ]] || return 1
+  jq -e '.panes.main.paneId == "42"' "$d/.zcrew/registry.json" >/dev/null
+}
+
+test_72c_claim_errors_when_live_main_owned_by_other_pane() {
+  local d mockbin out
+  d="$(new_test_dir 72c)"
+  mockbin="$d/mock-bin"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register main --paneId 50 --sessionId s50 --agent unknown --cwd "$d" --pid 50 --status alive >/dev/null 2>&1 || return 1
+  prepare_send_test_tools "$d" "$mockbin" "$d/tell-args.txt" "50,42"
+
+  if out="$(cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=42 "$ZCREW_BIN" claim 2>&1)"; then
+    return 1
+  fi
+  printf '%s\n' "$out" | grep -Fxq 'zcrew: main is already main (paneId 50). Use --replace to swap.'
+}
+
+test_72d_claim_is_idempotent_when_caller_is_live_main() {
+  local d mockbin before after out
+  d="$(new_test_dir 72d)"
+  mockbin="$d/mock-bin"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register main --paneId 42 --sessionId s42 --agent unknown --cwd "$d" --pid 42 --status alive >/dev/null 2>&1 || return 1
+  prepare_send_test_tools "$d" "$mockbin" "$d/tell-args.txt" "42"
+  before="$(sha256sum "$d/.zcrew/registry.json")" || return 1
+
+  out="$(cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=42 "$ZCREW_BIN" claim 2>&1)" || return 1
+  after="$(sha256sum "$d/.zcrew/registry.json")" || return 1
+
+  [[ -z "$out" ]] || return 1
+  [[ "$before" == "$after" ]]
+}
+
+test_72e_claim_replace_swaps_live_main_and_prints_old_info() {
+  local d mockbin out
+  d="$(new_test_dir 72e)"
+  mockbin="$d/mock-bin"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register main --paneId 50 --sessionId s50 --agent unknown --cwd "$d" --pid 50 --status alive >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register pane-42 --paneId 42 --sessionId s42 --agent unknown --cwd "$d" --pid 42 --status alive >/dev/null 2>&1 || return 1
+  prepare_send_test_tools "$d" "$mockbin" "$d/tell-args.txt" "50,42"
+
+  out="$(cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=42 "$ZCREW_BIN" claim --replace 2>&1)" || return 1
+  printf '%s\n' "$out" | grep -Fxq 'replacing main: main (paneId 50)' || return 1
+  jq -e '.panes.main.paneId == "42" and (.panes | has("pane-42") | not)' "$d/.zcrew/registry.json" >/dev/null
+}
+
+test_72f_claim_from_worker_errors() {
+  local d out
+  d="$(new_test_dir 72f)"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  if out="$(cd "$d" && BX_INSIDE=1 ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=42 "$ZCREW_BIN" claim 2>&1)"; then
+    return 1
+  fi
+  printf '%s\n' "$out" | grep -Fxq 'zcrew claim is host-only; run it in the orchestrator pane.'
+}
+
+test_72g_claim_outside_zellij_errors() {
+  local d out
+  d="$(new_test_dir 72g)"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  if out="$(cd "$d" && env -u BX_INSIDE -u ZELLIJ_PANE_ID -u ZELLIJ_SESSION_NAME "$ZCREW_BIN" claim 2>&1)"; then
+    return 1
+  fi
+  printf '%s\n' "$out" | grep -Fxq 'zcrew: claim must be run inside a zellij pane'
+}
+
+test_72h_reply_without_main_shows_claim_hint() {
+  local d mockbin args_file out
+  d="$(new_test_dir 72h)"
+  mockbin="$d/mock-bin"
+  args_file="$d/tell-args.txt"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register pane-77 --paneId 77 --sessionId s77 --agent unknown --cwd "$d" --pid 77 --status alive >/dev/null 2>&1 || return 1
+  prepare_send_test_tools "$d" "$mockbin" "$args_file" "77"
+
+  if out="$(cd "$d" && BX_INSIDE=1 PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=77 "$ZCREW_BIN" reply "foo" 2>&1)"; then
+    return 1
+  fi
+  printf '%s\n' "$out" | grep -Fxq 'zcrew: no main registered. Ask the user to run "zcrew claim" in the orchestrator pane.' || return 1
+  [[ ! -e "$args_file" ]]
+}
+
+test_72i_reply_succeeds_after_orchestrator_claim() {
+  local d mockbin args_file
+  d="$(new_test_dir 72i)"
+  mockbin="$d/mock-bin"
+  args_file="$d/tell-args.txt"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register pane-77 --paneId 77 --sessionId s77 --agent unknown --cwd "$d" --pid 77 --status alive >/dev/null 2>&1 || return 1
+  prepare_send_test_tools "$d" "$mockbin" "$args_file" "42,77"
+
+  (cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=42 "$ZCREW_BIN" claim >/dev/null 2>&1) || return 1
+  (cd "$d" && BX_INSIDE=1 PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=77 "$ZCREW_BIN" reply "foo" >/dev/null 2>&1) || return 1
+
+  [[ "$(cat "$args_file")" == '42 foo' ]]
+}
+
 test_73_reply_cmd_constant_is_single_source() {
   [[ "$(grep -Fc 'REPLY_CMD=' "$ZCREW_BIN")" -eq 1 ]] || return 1
   [[ "$(grep -Fc 'REPLY_CMD' "$ZCREW_BIN")" -ge 3 ]]
@@ -2478,6 +2663,9 @@ main() {
   run_test "11e) spawn built-in agent uses launcher script" test_11e_spawn_builtin_agent_uses_launcher_script
   run_test "11f) spawn seeds missing managed bx mounts" test_11f_spawn_seeds_missing_managed_mounts
   run_test "11g) spawn repairs managed mounts preserving custom lines" test_11g_spawn_repairs_managed_mounts_preserving_custom_lines
+  run_test "11h) spawn claims host as main when absent" test_11h_spawn_claims_host_as_main_when_absent
+  run_test "11i) spawn does not churn when live main exists" test_11i_spawn_does_not_churn_when_live_main_exists
+  run_test "11j) spawn outside zellij skips claim without error" test_11j_spawn_outside_zellij_skips_claim_without_error
   run_test "12) send outside project fails hard" test_12_send_outside_project_fails_hard
   run_test "12b) stale send suggestion preserves unknown agent name" test_12b_send_stale_unknown_agent_preserves_agent_name_in_suggestion
   run_test "13) rename foo->bar preserves fields and removes old key" test_13_rename_happy_path_preserves_fields
@@ -2560,6 +2748,14 @@ main() {
   run_test "70) reply rejects host usage" test_70_reply_rejects_host_usage
   run_test "71) reply requires message" test_71_reply_requires_message
   run_test "72) reply from worker sends to main" test_72_reply_from_worker_sends_to_main
+  run_test "72b) claim with no main registers caller" test_72b_claim_with_no_main_registers_caller
+  run_test "72c) claim errors when live main owned by other pane" test_72c_claim_errors_when_live_main_owned_by_other_pane
+  run_test "72d) claim is idempotent when caller is live main" test_72d_claim_is_idempotent_when_caller_is_live_main
+  run_test "72e) claim --replace swaps live main and prints old info" test_72e_claim_replace_swaps_live_main_and_prints_old_info
+  run_test "72f) claim from worker errors" test_72f_claim_from_worker_errors
+  run_test "72g) claim outside zellij errors" test_72g_claim_outside_zellij_errors
+  run_test "72h) worker reply without main shows claim hint" test_72h_reply_without_main_shows_claim_hint
+  run_test "72i) worker reply succeeds after orchestrator claim" test_72i_reply_succeeds_after_orchestrator_claim
   run_test "73) REPLY_CMD constant is single-source" test_73_reply_cmd_constant_is_single_source
   run_test "74) skill docs reference zcrew reply for workers" test_74_skill_docs_reference_reply_for_workers
   run_test "75) upgrade removes marker-matched legacy file even if content differs" test_75_upgrade_removes_marker_matched_legacy_file_even_if_different
