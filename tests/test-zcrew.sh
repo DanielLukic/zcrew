@@ -2411,6 +2411,24 @@ test_72i_reply_succeeds_after_orchestrator_claim() {
   [[ "$(cat "$args_file")" == '42 foo' ]]
 }
 
+test_72j_reply_with_stale_main_shows_claim_hint() {
+  local d mockbin args_file out
+  d="$(new_test_dir 72j)"
+  mockbin="$d/mock-bin"
+  args_file="$d/tell-args.txt"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register main --paneId 42 --sessionId s42 --agent unknown --cwd "$d" --pid 42 --status alive >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register pane-77 --paneId 77 --sessionId s77 --agent unknown --cwd "$d" --pid 77 --status alive >/dev/null 2>&1 || return 1
+  prepare_send_test_tools "$d" "$mockbin" "$args_file" "77"
+
+  if out="$(cd "$d" && BX_INSIDE=1 ZCREW_AUTO_SYNC=0 PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=77 "$ZCREW_BIN" reply "foo" 2>&1)"; then
+    return 1
+  fi
+  printf '%s\n' "$out" | grep -Fxq 'zcrew: no live main registered. Ask the user to run "zcrew claim" in the orchestrator pane.' || return 1
+  [[ ! -e "$args_file" ]]
+}
+
 test_73_reply_cmd_constant_is_single_source() {
   [[ "$(grep -Fc 'REPLY_CMD=' "$ZCREW_BIN")" -eq 1 ]] || return 1
   [[ "$(grep -Fc 'REPLY_CMD' "$ZCREW_BIN")" -ge 3 ]]
@@ -2757,6 +2775,7 @@ main() {
   run_test "72g) claim outside zellij errors" test_72g_claim_outside_zellij_errors
   run_test "72h) worker reply without main shows claim hint" test_72h_reply_without_main_shows_claim_hint
   run_test "72i) worker reply succeeds after orchestrator claim" test_72i_reply_succeeds_after_orchestrator_claim
+  run_test "72j) worker reply with stale main shows claim hint" test_72j_reply_with_stale_main_shows_claim_hint
   run_test "73) REPLY_CMD constant is single-source" test_73_reply_cmd_constant_is_single_source
   run_test "74) skill docs reference zcrew reply for workers" test_74_skill_docs_reference_reply_for_workers
   run_test "75) upgrade removes marker-matched legacy file even if content differs" test_75_upgrade_removes_marker_matched_legacy_file_even_if_different
