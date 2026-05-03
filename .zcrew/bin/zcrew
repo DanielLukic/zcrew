@@ -1421,8 +1421,15 @@ cmd_list() {
 
 reconcile_registry_with_zellij() {
   local prune="${1:-false}"
-  local live_json now
-  live_json=$(zellij action list-panes | sed -n 's/.*terminal_\([0-9][0-9]*\).*/\1/p' | jq -Rsc 'split("\n") | map(select(length>0))')
+  [[ -n "${BX_INSIDE:-}" ]] && return 0
+
+  local live_json now registry_count
+  live_json=$(zellij action list-panes 2>/dev/null | sed -n 's/.*terminal_\([0-9][0-9]*\).*/\1/p' | jq -Rsc 'split("\n") | map(select(length>0))')
+  registry_count=$(jq '(.panes // {}) | length' "$REGISTRY_FILE")
+  if [[ "$prune" == "true" && "$live_json" == "[]" && "$registry_count" -gt 0 ]]; then
+    echo "warning: zellij returned no live panes; preserving non-empty registry" >&2
+    return 0
+  fi
   now=$(date +%s)
 
   # Three things at once:
