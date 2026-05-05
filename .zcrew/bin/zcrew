@@ -1371,6 +1371,8 @@ cmd_send() {
   local send_body
   if [[ -z "${BX_INSIDE:-}" && ! "$message" =~ ^/[a-zA-Z][a-zA-Z0-9_-]*($|[[:space:]]) ]]; then
     send_body="${message}"$'\n\n'"To report a result, finding, blocker, or question, run in your shell/bash tool — not as reply text:"$'\n\n'"  ${REPLY_CMD}"$'\n\n'"Only reply when you have a result, finding, blocker, or question. Never send acknowledgments. Never send to other workers."
+  elif [[ -n "${BX_INSIDE:-}" && "$name" == "main" && ! "$message" =~ ^/[a-zA-Z][a-zA-Z0-9_-]*($|[[:space:]]) ]]; then
+    send_body=$'\n\n'"Reply from ${sender_name:-unknown}:"$'\n'"${message}"
   else
     send_body="$message"
   fi

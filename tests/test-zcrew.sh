@@ -2074,7 +2074,7 @@ test_52_send_banner_host_only() {
   mockbin="$d/mock-bin"
   args_file="$d/tell-args.txt"
   banner=$'hello host\n\nTo report a result, finding, blocker, or question, run in your shell/bash tool — not as reply text:\n\n  zcrew reply "<your message>"\n\nOnly reply when you have a result, finding, blocker, or question. Never send acknowledgments. Never send to other workers.'
-  expected="123 $banner"$'\n''0 hello worker'
+  expected="123 $banner"$'\n''0 '$'\n\nReply from pane-77:\nhello worker'
 
   zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
   zcrew_cmd "$d" register main --paneId 0 --sessionId s0 --agent unknown --cwd "$d" --pid 1 --status alive >/dev/null 2>&1 || return 1
@@ -2369,8 +2369,57 @@ test_72_reply_from_worker_sends_to_main() {
 
   (cd "$d" && BX_INSIDE=1 PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=77 "$ZCREW_BIN" reply "foo" >/dev/null 2>&1) || return 1
 
-  [[ "$(cat "$args_file")" == '0 foo' ]] || return 1
+  [[ "$(cat "$args_file")" == $'0 \n\nReply from pane-77:\nfoo' ]] || return 1
   grep -Fq $'\tsend\tinfo\tentry name=main' "$d/.zcrew/audit.log"
+}
+
+test_72k_reply_from_worker_preserves_multiline_body() {
+  local d mockbin args_file sent expected
+  d="$(new_test_dir 72k)"
+  mockbin="$d/mock-bin"
+  args_file="$d/tell-args.txt"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register main --paneId 0 --sessionId s0 --agent unknown --cwd "$d" --pid 1 --status alive >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register sam --paneId 77 --sessionId s77 --agent unknown --cwd "$d" --pid 77 --status alive >/dev/null 2>&1 || return 1
+  prepare_send_test_tools "$d" "$mockbin" "$args_file" "0,77"
+
+  (cd "$d" && BX_INSIDE=1 PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=77 "$ZCREW_BIN" reply $'line one\nline two' >/dev/null 2>&1) || return 1
+
+  sent="$(cat "$args_file")"
+  expected=$'0 \n\nReply from sam:\nline one\nline two'
+  [[ "$sent" == "$expected" ]]
+}
+
+test_72l_reply_from_worker_with_empty_sender_uses_unknown() {
+  local d mockbin args_file
+  d="$(new_test_dir 72l)"
+  mockbin="$d/mock-bin"
+  args_file="$d/tell-args.txt"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register main --paneId 0 --sessionId s0 --agent unknown --cwd "$d" --pid 1 --status alive >/dev/null 2>&1 || return 1
+  prepare_send_test_tools "$d" "$mockbin" "$args_file" "0,77"
+
+  (cd "$d" && BX_INSIDE=1 PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=77 "$ZCREW_BIN" reply "done" >/dev/null 2>&1) || return 1
+
+  [[ "$(cat "$args_file")" == $'0 \n\nReply from unknown:\ndone' ]]
+}
+
+test_72m_reply_from_worker_with_slash_command_bypasses_prefix() {
+  local d mockbin args_file
+  d="$(new_test_dir 72m)"
+  mockbin="$d/mock-bin"
+  args_file="$d/tell-args.txt"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register main --paneId 0 --sessionId s0 --agent unknown --cwd "$d" --pid 1 --status alive >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register sam --paneId 77 --sessionId s77 --agent unknown --cwd "$d" --pid 77 --status alive >/dev/null 2>&1 || return 1
+  prepare_send_test_tools "$d" "$mockbin" "$args_file" "0,77"
+
+  (cd "$d" && BX_INSIDE=1 PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=77 "$ZCREW_BIN" reply "/compact" >/dev/null 2>&1) || return 1
+
+  [[ "$(cat "$args_file")" == '0 /compact' ]]
 }
 
 test_72b_claim_with_no_main_registers_caller() {
@@ -2485,7 +2534,7 @@ test_72i_reply_succeeds_after_orchestrator_claim() {
   (cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=42 "$ZCREW_BIN" claim >/dev/null 2>&1) || return 1
   (cd "$d" && BX_INSIDE=1 PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=77 "$ZCREW_BIN" reply "foo" >/dev/null 2>&1) || return 1
 
-  [[ "$(cat "$args_file")" == '42 foo' ]]
+  [[ "$(cat "$args_file")" == $'42 \n\nReply from pane-77:\nfoo' ]]
 }
 
 test_72j_reply_with_stale_main_shows_claim_hint() {
@@ -2926,6 +2975,9 @@ main() {
   run_test "70) reply rejects host usage" test_70_reply_rejects_host_usage
   run_test "71) reply requires message" test_71_reply_requires_message
   run_test "72) reply from worker sends to main" test_72_reply_from_worker_sends_to_main
+  run_test "72k) worker reply preserves multiline body" test_72k_reply_from_worker_preserves_multiline_body
+  run_test "72l) worker reply with empty sender uses unknown" test_72l_reply_from_worker_with_empty_sender_uses_unknown
+  run_test "72m) worker slash-command reply bypasses prefix" test_72m_reply_from_worker_with_slash_command_bypasses_prefix
   run_test "72b) claim with no main registers caller" test_72b_claim_with_no_main_registers_caller
   run_test "72c) claim errors when live main owned by other pane" test_72c_claim_errors_when_live_main_owned_by_other_pane
   run_test "72d) claim is idempotent when caller is live main" test_72d_claim_is_idempotent_when_caller_is_live_main
