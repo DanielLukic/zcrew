@@ -337,7 +337,8 @@ ensure_team_conf_template() {
 # name  agent  model  role
 claudio  claude  sonnet  assistant / researcher
 sam      codex   -       reviewer
-piper    pi      -       implementer
+sparky   codex   -       implementer
+piper    pi      -       optional alternative model agent
 EOF
 }
 
