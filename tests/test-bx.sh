@@ -228,18 +228,22 @@ test_8_codex_run_generates_trust_config_and_refreshes_auth() {
     bx_cmd "$p" init >/dev/null 2>&1 || return 1
     bx_cmd "$p" codex on >/dev/null 2>&1 || return 1
 
-    mkdir -p "$(dirname "$sandbox_conf")"
-    printf '%s\n' 'sandbox_pref = "keep-me"' > "$sandbox_conf"
-    printf '%s\n' '{"dummy":"old-sandbox-token"}' > "$sandbox_auth"
     printf '%s\n' 'host_pref = "from-host"' > "$HOST_HOME/.codex/config.toml"
     printf '%s\n' '{"dummy":"fresh-host-token"}' > "$HOST_HOME/.codex/auth.json"
 
     bx_cmd "$p" run true >/dev/null 2>&1 || true
-
-    ! grep -Fxq 'host_pref = "from-host"' "$sandbox_conf" || return 1
-    ! grep -Fxq 'sandbox_pref = "keep-me"' "$sandbox_conf" || return 1
     grep -Fxq "[projects.\"$p\"]" "$sandbox_conf" || return 1
     grep -Fxq 'trust_level = "trusted"' "$sandbox_conf" || return 1
+
+    printf '%s\n' '[mcp]' > "$sandbox_conf"
+    printf '%s\n' 'sandbox_pref = "keep-me"' >> "$sandbox_conf"
+    printf '%s\n' '{"dummy":"old-sandbox-token"}' > "$sandbox_auth"
+    bx_cmd "$p" run true >/dev/null 2>&1 || true
+
+    ! grep -Fxq 'host_pref = "from-host"' "$sandbox_conf" || return 1
+    grep -Fxq '[mcp]' "$sandbox_conf" || return 1
+    grep -Fxq 'sandbox_pref = "keep-me"' "$sandbox_conf" || return 1
+    ! grep -Fxq "[projects.\"$p\"]" "$sandbox_conf" || return 1
     grep -Fq '"fresh-host-token"' "$sandbox_auth"
 }
 
@@ -255,10 +259,13 @@ test_8c_pi_run_syncs_auth_models_and_targeted_settings() {
     mkdir -p "$p/.bx/home/.pi/agent"
     printf '%s\n' '{"keepLocal":true,"defaultProvider":"old","defaultModel":"old-model"}' > "$sandbox_settings"
     bx_cmd "$p" run true >/dev/null 2>&1 || true
+    jq '.mcpServers.local = {"command":"dummy"}' "$sandbox_mcp" > "$sandbox_mcp.tmp" || return 1
+    mv "$sandbox_mcp.tmp" "$sandbox_mcp"
+    bx_cmd "$p" run true >/dev/null 2>&1 || true
 
     [[ -f "$sandbox_auth" ]] || return 1
     [[ -f "$sandbox_mcp" ]] || return 1
-    jq -e '.mcpServers == {}' "$sandbox_mcp" >/dev/null || return 1
+    jq -e '.mcpServers.local.command == "dummy"' "$sandbox_mcp" >/dev/null || return 1
     [[ -f "$sandbox_settings" ]] || return 1
     jq -e '.keepLocal == true and .defaultProvider == "host" and .defaultModel == "host-model"' "$sandbox_settings" >/dev/null || return 1
     jq -e 'has("packages") | not' "$sandbox_settings" >/dev/null || return 1

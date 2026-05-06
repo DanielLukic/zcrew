@@ -1642,7 +1642,8 @@ test_34h_install_seeds_team_conf_template() {
   grep -Fxq '# name  agent  model  role' "$d/.zcrew/team.conf" || return 1
   grep -Fxq 'claudio  claude  sonnet  assistant / researcher' "$d/.zcrew/team.conf" || return 1
   grep -Fxq 'sam      codex   -       reviewer' "$d/.zcrew/team.conf" || return 1
-  grep -Fxq 'piper    pi      -       implementer' "$d/.zcrew/team.conf"
+  grep -Fxq 'sparky   codex   -       implementer' "$d/.zcrew/team.conf" || return 1
+  grep -Fxq 'piper    pi      -       optional alternative model agent' "$d/.zcrew/team.conf"
 }
 
 test_34i_reinstall_preserves_existing_team_conf() {

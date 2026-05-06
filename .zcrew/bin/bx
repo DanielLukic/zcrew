@@ -89,8 +89,12 @@ seed_claude_sandbox_state() {
 
 write_codex_sandbox_config() {
     local workdir="$1"
+    local config_file="$HOME_DIR/.codex/config.toml"
     mkdir -p "$HOME_DIR/.codex"
-    printf '[projects."%s"]\ntrust_level = "trusted"\n' "$workdir" > "$HOME_DIR/.codex/config.toml"
+    if [[ -f "$config_file" ]]; then
+        return 0
+    fi
+    printf '[projects."%s"]\ntrust_level = "trusted"\n' "$workdir" > "$config_file"
 }
 
 sync_pi_sandbox_settings() {
@@ -157,7 +161,18 @@ seed_pi_sandbox_state() {
     mkdir -p "$HOME_DIR/.pi/agent"
     sync_pi_sandbox_settings
     sync_pi_sandbox_models
-    printf '{"mcpServers":{}}\n' > "$HOME_DIR/.pi/agent/mcp.json"
+    seed_pi_sandbox_mcp
+}
+
+seed_pi_sandbox_mcp() {
+    local mcp_file="$HOME_DIR/.pi/agent/mcp.json"
+    if [[ -f "$mcp_file" ]] && jq -e '.mcpServers | type == "object"' "$mcp_file" >/dev/null 2>&1; then
+        return 0
+    fi
+    if [[ -f "$mcp_file" ]]; then
+        echo "bx: warning: $mcp_file is invalid; resetting to default" >&2
+    fi
+    printf '{"mcpServers":{}}\n' > "$mcp_file"
 }
 
 ensure_runtime_mountpoints() {
