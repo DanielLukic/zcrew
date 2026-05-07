@@ -543,6 +543,8 @@ run_bwrap() {
         args+=(--ro-bind "$HOME/.local/lib/node_modules/@openai/codex" "$SANDBOX_HOME/.local/lib/node_modules/@openai/codex")
     [[ -d "$HOME/.local/lib/node_modules/@mariozechner/pi-coding-agent" ]] && \
         args+=(--ro-bind "$HOME/.local/lib/node_modules/@mariozechner/pi-coding-agent" "$SANDBOX_HOME/.local/lib/node_modules/@mariozechner/pi-coding-agent")
+    [[ -d "$HOME/.local/lib/node_modules/pi-mcp-adapter" ]] && \
+        args+=(--ro-bind "$HOME/.local/lib/node_modules/pi-mcp-adapter" "$SANDBOX_HOME/.local/lib/node_modules/pi-mcp-adapter")
 
     # Config files (RO)
     [[ -f "$HOME/.gitconfig" ]] && \
