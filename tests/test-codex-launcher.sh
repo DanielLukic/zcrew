@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="/home/dl/Projects/zcrew"
-LAUNCHER="$ROOT/codex-launcher.sparky.sh"
+ROOT="$(cd "$(dirname "$0")"/.. && pwd)"
+LAUNCHER="$ROOT/.zcrew/lib/launchers/codex.sh"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT

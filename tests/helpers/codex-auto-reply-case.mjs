@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const ADAPTER = '/home/dl/Projects/zcrew/codex-auto-reply.sparky.mjs';
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const ADAPTER = path.resolve(__dirname, '..', '..', '.zcrew/lib/codex-auto-reply.mjs');
 const caseName = process.env.CASE_NAME;
 const callsFile = process.env.CALLS_FILE;
 const debug = process.env.DEBUG_CASE === '1';

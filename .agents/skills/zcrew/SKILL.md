@@ -34,30 +34,17 @@ Reconciles the registry with live panes. Human users can also run `/zsync`.
 
 ## How to invoke from an agent
 
-Prefer the native MCP tools when your agent exposes them. Fall back to Bash if a tool is unavailable.
+Each agent type has exactly one reply mechanism — use only that one.
 
-| Action | MCP tool (preferred) | Bash fallback |
+| Worker agent | Reply mechanism | What you do |
 |---|---|---|
-| Send to a worker (orchestrator) | `zcrew_send` (`name`, `message`, optional `compact`) | `Bash(zcrew send [--compact] <name> "<message>")` |
-| Reply to main (worker) | `zcrew_reply` (`message`) | `Bash(zcrew reply "<message>")` |
-| List the pane registry | `zcrew_list` | `Bash(zcrew list --json)` |
-| Spawn / close / rename / sync / claim | — | `Bash(zcrew <subcommand> ...)` |
+| **claude** | SessionStop hook auto-fires | Just write your result. The hook forwards your last assistant message to main. Don't call any tool. |
+| **codex** | app-server adapter auto-fires | Just write your result. The adapter forwards your last assistant message to main on `item/completed`. Don't call any tool. |
+| **pi** | `zcrew_reply` tool (native pi extension) | Call the `zcrew_reply` tool with your message. |
 
-The MCP path avoids bash quoting issues for multi-line messages and gives the agent typed args. The CLI is still the source of truth — MCP tools shell out to it, so registry behaviour, identity, and BX_INSIDE guards are identical.
+The orchestrator (host main) uses the MCP tools `zcrew_send` and `zcrew_list` from the project-root `.mcp.json`, with `Bash(zcrew <subcommand> ...)` for spawn / close / rename / sync / claim.
 
-Note: workers (`BX_INSIDE=1`) only see `zcrew_reply` over MCP — `zcrew_send` and `zcrew_list` are intentionally not exposed to workers (no paneId discovery, no worker-to-worker side channels). The Bash CLI still enforces the same restrictions.
-
-## Claude SessionStop marker
-
-Claude workers may report completion by placing a marker on the last line of the final assistant message:
-
-`<<DONE: payload>>`
-
-Rules:
-- The marker must be on the last line of the final assistant message. Trailing whitespace is allowed.
-- Payload may be multi-line inside the marker.
-- Literal `>>` inside payload is not supported; parsing ends at the first `>>`.
-- Use exactly one mechanism to report back: either call `zcrew_reply` / `zcrew reply`, or use `<<DONE: ...>>`, never both. Using both sends duplicate replies to main.
+Workers do not have `mcp__zcrew__*` tools exposed — claude and codex use auto-reply and need no tool, pi uses its native extension's `zcrew_reply`. Manual `Bash(zcrew reply ...)` is still possible inside any worker but unnecessary in normal flows.
 
 The `/z*` slash commands are for human users only and are not callable via the Skill tool.
 
@@ -67,7 +54,7 @@ You discuss, plan, delegate, and verify. You do not implement directly. Your job
 
 ### Orchestrator rules
 
-When a worker needs to report back to main, use the `zcrew_reply` MCP tool (or `Bash(zcrew reply "<message>")` if MCP is unavailable).
+Workers reply to main automatically — claude via SessionStop hook, codex via the app-server adapter, pi via its native `zcrew_reply` tool. You don't need to instruct workers about replies.
 If a worker reports `no main registered` or `no live main registered`, run `zcrew claim` in your orchestrator pane, then have the worker retry the reply.
 
 - **Run `zcrew claim` on session start** — registers your pane as `main` so workers can reply. Idempotent when you are already main.
