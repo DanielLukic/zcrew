@@ -511,7 +511,7 @@ MOCK_ZELLIJ
   [[ -f "$args_file" ]] || return 1
   sent="$(sed -n '1p' "$args_file")"
   [[ "$sent" == 123\ hello\ world* ]] || return 1
-  grep -q 'To report a result, finding, blocker, or question' "$args_file"
+  grep -q '<<DONE: payload>>' "$args_file"
 }
 
 test_9b_send_compact_calls_tell_twice_with_delay() {
@@ -631,7 +631,7 @@ test_9f_send_path_like_message_keeps_banner_from_host() {
 
   sent="$(cat "$args_file")"
   [[ "$sent" == 123\ /path/to/file* ]] || return 1
-  grep -Fq 'To report a result, finding, blocker, or question' "$args_file"
+  grep -Fq '<<DONE: payload>>' "$args_file"
 }
 
 test_10_sync_no_prune_marks_stale_not_delete() {
@@ -2102,24 +2102,40 @@ test_51_send_rejects_worker_to_worker() {
 }
 
 test_52_send_banner_host_only() {
-  local d mockbin args_file sent banner expected
+  local d mockbin args_file sent
+  local claude_footer pi_footer codex_footer
   d="$(new_test_dir 52)"
   mockbin="$d/mock-bin"
   args_file="$d/tell-args.txt"
-  banner=$'hello host\n\nTo report a result, finding, blocker, or question, run in your shell/bash tool — not as reply text:\n\n  zcrew reply "<your message>"\n\nOnly reply when you have a result, finding, blocker, or question. Never send acknowledgments. Never send to other workers.'
-  expected="123 $banner"$'\n''0 '$'\n\nReply from pane-77:\nhello worker'
+  claude_footer=$'End your final assistant message with `<<DONE: payload>>` on the last line. A SessionStop hook will auto-fire your reply. Manual `zcrew reply "<msg>"` still works if you prefer. Use ONE mechanism, never both.\n\nOnly reply when you have a result, finding, blocker, or question. Never send acknowledgments. Never send to other workers.'
+  pi_footer=$'Call the zcrew_reply MCP tool with your message. Manual `zcrew reply "<msg>"` via shell is the fallback if the tool isn\'t available.\n\nOnly reply when you have a result, finding, blocker, or question. Never send acknowledgments. Never send to other workers.'
+  codex_footer=$'Call the mcp__zcrew__zcrew_reply tool with your message. If unavailable, run `zcrew reply "<your message>"` in your shell.\n\nOnly reply when you have a result, finding, blocker, or question. Never send acknowledgments. Never send to other workers.'
 
   zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
   zcrew_cmd "$d" register main --paneId 0 --sessionId s0 --agent unknown --cwd "$d" --pid 1 --status alive >/dev/null 2>&1 || return 1
   zcrew_cmd "$d" register buddy --paneId 123 --sessionId s1 --agent claude --cwd "$d" --pid 2 --status alive >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register piper --paneId 124 --sessionId s2 --agent pi --cwd "$d" --pid 3 --status alive >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register coder --paneId 125 --sessionId s3 --agent codex --cwd "$d" --pid 4 --status alive >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register mystery --paneId 126 --sessionId s4 --agent unknown --cwd "$d" --pid 5 --status alive >/dev/null 2>&1 || return 1
   zcrew_cmd "$d" register pane-77 --paneId 77 --sessionId s77 --agent unknown --cwd "$d" --pid 77 --status alive >/dev/null 2>&1 || return 1
-  prepare_send_test_tools "$d" "$mockbin" "$args_file" "0,77,123"
+  prepare_send_test_tools "$d" "$mockbin" "$args_file" "0,77,123,124,125,126"
 
-  (cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=0 "$ZCREW_BIN" send buddy "hello host" >/dev/null 2>&1) || return 1
+  (cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=0 "$ZCREW_BIN" send buddy "hello claude" >/dev/null 2>&1) || return 1
+  (cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=0 "$ZCREW_BIN" send piper "hello pi" >/dev/null 2>&1) || return 1
+  (cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=0 "$ZCREW_BIN" send coder "hello codex" >/dev/null 2>&1) || return 1
+  (cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=0 "$ZCREW_BIN" send mystery "hello unknown" >/dev/null 2>&1) || return 1
   (cd "$d" && BX_INSIDE=1 PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=77 "$ZCREW_BIN" send main "hello worker" >/dev/null 2>&1) || return 1
 
   sent="$(cat "$args_file")"
-  [[ "$sent" == "$expected" ]]
+  grep -Fq "123 hello claude" <<< "$sent" || return 1
+  grep -Fq "$claude_footer" <<< "$sent" || return 1
+  grep -Fq "124 hello pi" <<< "$sent" || return 1
+  grep -Fq "$pi_footer" <<< "$sent" || return 1
+  grep -Fq "125 hello codex" <<< "$sent" || return 1
+  grep -Fq "$codex_footer" <<< "$sent" || return 1
+  grep -Fq "126 hello unknown" <<< "$sent" || return 1
+  grep -Fq "mcp__zcrew__zcrew_reply tool" <<< "$sent" || return 1
+  grep -Fq $'0 \n\nReply from pane-77:\nhello worker' <<< "$sent"
 }
 
 test_53_rename_main_alias_guards() {
@@ -2158,7 +2174,7 @@ test_54_send_claims_main_after_main_disappears() {
   (cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=88 "$ZCREW_BIN" send helper "hello after restart" >/dev/null 2>&1) || return 1
 
   jq -e '.panes.main.paneId == "88" and (.panes | has("pane-88") | not)' "$d/.zcrew/registry.json" >/dev/null || return 1
-  grep -Fq 'zcrew reply "<your message>"' "$args_file"
+  grep -Fq '<<DONE: payload>>' "$args_file"
 }
 
 test_55_install_migrates_stale_layout_when_single_old_file_exists() {

@@ -1407,6 +1407,8 @@ cmd_send() {
   claim_main_for_send >/dev/null
   local sender_name
   sender_name="$(resolve_sender_name_readonly)"
+  local target_agent
+  target_agent="$(lookup_registered_agent "$name")"
 
   local pane_id
   pane_id=$(lookup_registered_pane_id "$name")
@@ -1436,11 +1438,11 @@ cmd_send() {
       echo 'zcrew: no live main registered. Ask the user to run "zcrew claim" in the orchestrator pane.' >&2
       exit 1
     fi
-    print_stale_send_error "$name" "$pane_id" "$(lookup_registered_agent "$name")"
+    print_stale_send_error "$name" "$pane_id" "$target_agent"
     exit 1
   fi
 
-  refresh_claude_auth_for_target "$(lookup_registered_cwd "$name")" "$(lookup_registered_agent "$name")"
+  refresh_claude_auth_for_target "$(lookup_registered_cwd "$name")" "$target_agent"
   local tell_bin="$PROJECT_DIR/.zcrew/lib/tell"
   if [[ ! -x "$tell_bin" ]]; then
     echo "zcrew: missing tell transport at $tell_bin — run: zcrew install ." >&2
@@ -1454,8 +1456,15 @@ cmd_send() {
   fi
 
   local send_body
+  local _tail_only=$'\n\n'"Only reply when you have a result, finding, blocker, or question. Never send acknowledgments. Never send to other workers."
   if [[ -z "${BX_INSIDE:-}" && ! "$message" =~ ^/[a-zA-Z][a-zA-Z0-9_-]*($|[[:space:]]) ]]; then
-    send_body="${message}"$'\n\n'"To report a result, finding, blocker, or question, run in your shell/bash tool — not as reply text:"$'\n\n'"  ${REPLY_CMD}"$'\n\n'"Only reply when you have a result, finding, blocker, or question. Never send acknowledgments. Never send to other workers."
+    if [[ "$target_agent" == "claude" ]]; then
+      send_body="${message}"$'\n\n'"End your final assistant message with \`<<DONE: payload>>\` on the last line. A SessionStop hook will auto-fire your reply. Manual \`zcrew reply \"<msg>\"\` still works if you prefer. Use ONE mechanism, never both.${_tail_only}"
+    elif [[ "$target_agent" == "pi" ]]; then
+      send_body="${message}"$'\n\n'"Call the zcrew_reply MCP tool with your message. Manual \`zcrew reply \"<msg>\"\` via shell is the fallback if the tool isn't available.${_tail_only}"
+    else
+      send_body="${message}"$'\n\n'"Call the mcp__zcrew__zcrew_reply tool with your message. If unavailable, run \`${REPLY_CMD}\` in your shell.${_tail_only}"
+    fi
   elif [[ -n "${BX_INSIDE:-}" && "$name" == "main" && ! "$message" =~ ^/[a-zA-Z][a-zA-Z0-9_-]*($|[[:space:]]) ]]; then
     send_body=$'\n\n'"Reply from ${sender_name:-unknown}:"$'\n'"${message}"
   else
