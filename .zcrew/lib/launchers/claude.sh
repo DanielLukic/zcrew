@@ -23,7 +23,7 @@ if command -v jq >/dev/null 2>&1; then
   settings_local="$project_dir/.claude/settings.local.json"
   mkdir -p "$(dirname "$settings_local")"
   [[ -f "$settings_local" ]] || printf '{}\n' > "$settings_local"
-  stop_hook_cmd='${CLAUDE_PROJECT_DIR}/.zcrew/lib/stop-hook.sh'
+  stop_hook_cmd="$project_dir/.zcrew/lib/stop-hook.sh"
   settings_tmp="$settings_local.tmp.$$"
   if jq --arg cmd "$stop_hook_cmd" '
     .hooks = (.hooks // {})

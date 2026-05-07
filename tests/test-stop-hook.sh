@@ -5,7 +5,7 @@ set -euo pipefail
 # ── test harness ─────────────────────────────────────────────────────
 pass=0 fail=0
 HOOK_DIR="$(cd "$(dirname "$0")"/.. && pwd)"
-HOOK="$HOOK_DIR/stop-hook.piper.sh"
+HOOK="$HOOK_DIR/stop-hook.sparky.sh"
 MOCK_ZCREW_DIR="$(mktemp -d)"
 MOCK_ZCREW="$MOCK_ZCREW_DIR/zcrew"
 TRANSCRIPT_DIR="$(mktemp -d)"
@@ -39,6 +39,10 @@ make_transcript() {
   done
   items="${items%,}"
   printf '{"type":"assistant","message":{"role":"assistant","content":[%s]}}\n' "$items"
+}
+
+make_raw_transcript() {
+  printf '%s\n' "$@"
 }
 
 # ── helper: run hook with given session_id and transcript content ────
@@ -152,6 +156,19 @@ expected=$'reply line1\nline2'
 assert_eq "multi-line payload" "$expected" "$(reply_calls)"
 
 # ═══════════════════════════════════════════════════════════════════════
+# Test 6: Last assistant is tool_use, previous assistant text has marker
+# → reply still fires from latest assistant-with-text turn
+# ═══════════════════════════════════════════════════════════════════════
+reset_calls
+transcript="$(make_raw_transcript \
+  "$(jq -cn --arg t $'work complete\n<<DONE: from text turn>>' '{type:"assistant",message:{role:"assistant",content:[{type:"text",text:$t}]}}')" \
+  "$(jq -cn '{type:"assistant",message:{role:"assistant",content:[{type:"tool_use",id:"t1",name:"Bash",input:{cmd:"echo x"}}]}}')" \
+)"
+run_hook "sid-6" "$transcript"
+rm -rf "${REPLY_FAKE_HOME:-/tmp/noop}"
+assert_eq "last assistant tool_use falls back to last assistant text" "reply from text turn" "$(reply_calls)"
+
+# ═══════════════════════════════════════════════════════════════════════
 # Test 6: Hook fail-closed: malformed JSON on stdin → exit 0
 # ═══════════════════════════════════════════════════════════════════════
 reset_calls
@@ -208,7 +225,7 @@ assert_no_calls "jq error no reply"
 # Simulate the jq merge the launcher would do, run it twice, verify same output
 settings_file="$SETTINGS_DIR/settings.local.json"
 printf '{}\n' > "$settings_file"
-stop_hook_cmd='${CLAUDE_PROJECT_DIR}/.zcrew/lib/stop-hook.sh'
+stop_hook_cmd="$PROJECT_DIR/.zcrew/lib/stop-hook.sh"
 
 # First merge
 jq --arg cmd "$stop_hook_cmd" '
@@ -243,7 +260,7 @@ assert_eq "idempotent merge" "$first" "$second"
 hooks_count="$(jq '.hooks.Stop | length' "$settings_file")"
 assert_eq "one Stop hook entry" "1" "$hooks_count"
 entry_cmd="$(jq -r '.hooks.Stop[0].hooks[0].command' "$settings_file")"
-expected_cmd="\${CLAUDE_PROJECT_DIR}/.zcrew/lib/stop-hook.sh"
+expected_cmd="$PROJECT_DIR/.zcrew/lib/stop-hook.sh"
 assert_eq "correct hook command" "$expected_cmd" "$entry_cmd"
 
 # ═══════════════════════════════════════════════════════════════════════
