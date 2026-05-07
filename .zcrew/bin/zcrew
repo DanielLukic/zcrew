@@ -836,44 +836,28 @@ seed_mcp_configs() {
     mv "$tmp" "$proj_mcp"
   fi
 
-  # Sandbox pi mcp.json (worker view; bx now preserves it across runs).
-  # Pass BX_INSIDE=1 explicitly because some MCP clients sanitize env when
-  # spawning servers — without this the server would start in orchestrator
-  # mode and expose zcrew_send/zcrew_list to workers.
+  # Sandbox pi mcp.json: pi worker uses the native extension (.zcrew/lib/
+  # pi-zcrew-ext.ts), not MCP. Strip any pre-existing zcrew entry to avoid
+  # double-fire. Preserve any non-zcrew entries the user may have added.
   local pi_mcp="$target/.bx/home/.pi/agent/mcp.json"
-  if [[ -d "$target/.bx/home" ]]; then
-    mkdir -p "$(dirname "$pi_mcp")"
+  if [[ -f "$pi_mcp" ]] && jq -e '.mcpServers.zcrew' "$pi_mcp" >/dev/null 2>&1; then
     tmp=$(mktemp "$pi_mcp.tmp.XXXXXX")
-    if [[ -f "$pi_mcp" ]] && jq -e '.mcpServers | type == "object"' "$pi_mcp" >/dev/null 2>&1; then
-      jq --arg cmd python3 --arg path "$server_path" \
-        '.mcpServers.zcrew = {command:$cmd, args:[$path], env:{BX_INSIDE:"1"}}' \
-        "$pi_mcp" > "$tmp" && mv "$tmp" "$pi_mcp" || rm -f "$tmp"
-    else
-      jq -n --arg cmd python3 --arg path "$server_path" \
-        '{mcpServers:{zcrew:{command:$cmd, args:[$path], env:{BX_INSIDE:"1"}}}}' > "$tmp"
-      mv "$tmp" "$pi_mcp"
-    fi
+    jq '.mcpServers = ((.mcpServers // {}) | del(.zcrew))' "$pi_mcp" > "$tmp" \
+      && mv "$tmp" "$pi_mcp" || rm -f "$tmp"
   fi
 
-  # Sandbox codex config.toml: idempotent block replace/append.
+  # Sandbox codex config.toml: codex worker uses the app-server adapter
+  # (.zcrew/lib/codex-auto-reply.mjs), not MCP. Strip any pre-existing
+  # [mcp_servers.zcrew] block. Preserve other tables.
   local codex_conf="$target/.bx/home/.codex/config.toml"
-  if [[ -d "$target/.bx/home" ]]; then
-    mkdir -p "$(dirname "$codex_conf")"
-    local block
-    printf -v block '[mcp_servers.zcrew]\ncommand = "python3"\nargs = ["%s"]\nenv = { BX_INSIDE = "1" }' "$server_path"
-    if [[ -f "$codex_conf" ]] && grep -Fxq '[mcp_servers.zcrew]' "$codex_conf"; then
-      tmp=$(mktemp "$codex_conf.tmp.XXXXXX")
-      awk -v block="$block" '
-        BEGIN { skip = 0 }
-        /^\[mcp_servers\.zcrew\][[:space:]]*$/ { print block; skip = 1; next }
-        skip && /^\[/ { skip = 0 }
-        !skip { print }
-      ' "$codex_conf" > "$tmp" && mv "$tmp" "$codex_conf" || rm -f "$tmp"
-    elif [[ -f "$codex_conf" ]]; then
-      printf '\n%s\n' "$block" >> "$codex_conf"
-    else
-      printf '%s\n' "$block" > "$codex_conf"
-    fi
+  if [[ -f "$codex_conf" ]] && grep -Fxq '[mcp_servers.zcrew]' "$codex_conf"; then
+    tmp=$(mktemp "$codex_conf.tmp.XXXXXX")
+    awk '
+      BEGIN { skip = 0 }
+      /^\[mcp_servers\.zcrew\][[:space:]]*$/ { skip = 1; next }
+      skip && /^\[/ { skip = 0 }
+      !skip { print }
+    ' "$codex_conf" > "$tmp" && mv "$tmp" "$codex_conf" || rm -f "$tmp"
   fi
 }
 
@@ -1462,10 +1446,13 @@ cmd_send() {
   local send_body
   local _tail_only=$'\n\n'"Only reply when you have a result, finding, blocker, or question. Never send acknowledgments. Never send to other workers."
   if [[ -z "${BX_INSIDE:-}" && ! "$message" =~ ^/[a-zA-Z][a-zA-Z0-9_-]*($|[[:space:]]) ]]; then
-    if [[ "$target_agent" == "claude" ]]; then
+    if [[ "$target_agent" == "claude" || "$target_agent" == "codex" ]]; then
+      # Claude has a SessionStop hook that auto-fires the reply.
+      # Codex has an app-server adapter that auto-fires on item/completed.
+      # Worker just writes its result; no instructions needed.
       send_body="$message"
     elif [[ "$target_agent" == "pi" ]]; then
-      send_body="${message}"$'\n\n'"Call the zcrew_reply MCP tool with your message. Manual \`zcrew reply \"<msg>\"\` via shell is the fallback if the tool isn't available.${_tail_only}"
+      send_body="${message}"$'\n\n'"Call the zcrew_reply tool with your message.${_tail_only}"
     else
       send_body="${message}"$'\n\n'"Call the mcp__zcrew__zcrew_reply tool with your message. If unavailable, run \`${REPLY_CMD}\` in your shell.${_tail_only}"
     fi

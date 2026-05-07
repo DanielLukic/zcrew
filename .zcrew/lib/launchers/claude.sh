@@ -37,5 +37,5 @@ if command -v jq >/dev/null 2>&1; then
   fi
 fi
 
-cmd=(claude --dangerously-skip-permissions --model "${ZCREW_MODEL:-sonnet}" --setting-sources project,local --strict-mcp-config --mcp-config .mcp.json)
+cmd=(claude --dangerously-skip-permissions --model "${ZCREW_MODEL:-sonnet}" --setting-sources project,local --strict-mcp-config)
 exec bx run "${cmd[@]}"

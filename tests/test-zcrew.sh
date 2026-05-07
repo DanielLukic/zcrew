@@ -617,8 +617,10 @@ test_9f_send_path_like_message_keeps_banner_from_host() {
   args_file="$d/tell-args.txt"
 
   zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
-  # Use a codex worker because claude no longer gets a footer at all.
-  zcrew_cmd "$d" register buddy --paneId 123 --sessionId s --agent codex --cwd "$d" --pid 1 --status alive >/dev/null 2>&1 || return 1
+  # Use an unknown-agent worker because claude/codex no longer get a footer
+  # (auto-reply mechanisms cover them) and pi has its own short footer.
+  # Unknown agents fall through to the verbose fallback footer.
+  zcrew_cmd "$d" register buddy --paneId 123 --sessionId s --agent unknown --cwd "$d" --pid 1 --status alive >/dev/null 2>&1 || return 1
   prepare_send_test_tools "$d" "$mockbin" "$args_file"
 
   (
@@ -631,7 +633,7 @@ test_9f_send_path_like_message_keeps_banner_from_host() {
 
   sent="$(cat "$args_file")"
   [[ "$sent" == 123\ /path/to/file* ]] || return 1
-  # path-like slash message is treated as regular text, so footer is appended.
+  # path-like slash message is treated as regular text, so fallback footer is appended.
   grep -Fq 'mcp__zcrew__zcrew_reply' "$args_file"
 }
 
@@ -1668,13 +1670,19 @@ test_34j_install_seeds_mcp_configs() {
 
   zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
 
+  # Project-root .mcp.json: orchestrator (host main) needs zcrew_send /
+  # zcrew_list MCP tools.
   jq -e '.mcpServers.zcrew.command == "python3"' "$d/.mcp.json" >/dev/null || return 1
   jq -e ".mcpServers.zcrew.args[0] | endswith(\".zcrew/lib/mcp_server.py\")" "$d/.mcp.json" >/dev/null || return 1
-  jq -e '.mcpServers.zcrew.command == "python3"' "$d/.bx/home/.pi/agent/mcp.json" >/dev/null || return 1
-  jq -e '.mcpServers.zcrew.env.BX_INSIDE == "1"' "$d/.bx/home/.pi/agent/mcp.json" >/dev/null || return 1
-  grep -Fxq '[mcp_servers.zcrew]' "$d/.bx/home/.codex/config.toml" || return 1
-  grep -Fxq 'command = "python3"' "$d/.bx/home/.codex/config.toml" || return 1
-  grep -Fxq 'env = { BX_INSIDE = "1" }' "$d/.bx/home/.codex/config.toml"
+  # Sandbox pi mcp.json: zcrew NOT seeded — pi worker uses native extension.
+  if [[ -f "$d/.bx/home/.pi/agent/mcp.json" ]]; then
+    jq -e '.mcpServers // {} | has("zcrew") | not' "$d/.bx/home/.pi/agent/mcp.json" >/dev/null || return 1
+  fi
+  # Sandbox codex config.toml: zcrew block NOT seeded — codex worker uses
+  # the app-server adapter for auto-reply.
+  if [[ -f "$d/.bx/home/.codex/config.toml" ]]; then
+    ! grep -Fxq '[mcp_servers.zcrew]' "$d/.bx/home/.codex/config.toml"
+  fi
 }
 
 test_34k_reinstall_preserves_other_mcp_servers() {
@@ -1955,6 +1963,16 @@ EOF
   [[ "$(grep -Fxc '[projects."/tmp/other-project"]' "$sandbox_config")" -eq 1 ]] || return 1
 }
 
+test_44b_claude_launcher_drops_mcp_config() {
+  # Claude worker uses the SessionStop hook for auto-reply, not MCP. The
+  # launcher must NOT pass --mcp-config (which would reload the project
+  # zcrew MCP server inside the worker and create dual-fire). Strict mode
+  # without --mcp-config gives the worker zero MCP servers.
+  local launcher="$REPO_ROOT/.zcrew/lib/launchers/claude.sh"
+  grep -Fq -- '--strict-mcp-config' "$launcher" || return 1
+  ! grep -Fq -- '--mcp-config' "$launcher"
+}
+
 test_45_install_self_install_no_crash() {
   local d fixture out
   d="$(new_test_dir 45)"
@@ -2101,7 +2119,7 @@ test_52_send_banner_host_only() {
   d="$(new_test_dir 52)"
   mockbin="$d/mock-bin"
   args_file="$d/tell-args.txt"
-  pi_footer=$'Call the zcrew_reply MCP tool with your message. Manual `zcrew reply "<msg>"` via shell is the fallback if the tool isn\'t available.\n\nOnly reply when you have a result, finding, blocker, or question. Never send acknowledgments. Never send to other workers.'
+  pi_footer=$'Call the zcrew_reply tool with your message.\n\nOnly reply when you have a result, finding, blocker, or question. Never send acknowledgments. Never send to other workers.'
   codex_footer=$'Call the mcp__zcrew__zcrew_reply tool with your message. If unavailable, run `zcrew reply "<your message>"` in your shell.\n\nOnly reply when you have a result, finding, blocker, or question. Never send acknowledgments. Never send to other workers.'
 
   zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
@@ -2120,18 +2138,16 @@ test_52_send_banner_host_only() {
   (cd "$d" && BX_INSIDE=1 PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=77 "$ZCREW_BIN" send main "hello worker" >/dev/null 2>&1) || return 1
 
   sent="$(cat "$args_file")"
-  # Claude target: NO footer — message is verbatim.
+  # Claude target: NO footer — message is verbatim (hook auto-fire).
   grep -Fxq "123 hello claude" <<< "$sent" || return 1
-  ! grep -Fq "Only reply when you have a result" <<< "$(grep -F "123 " <<< "$sent")" || return 1
+  # Codex target: NO footer — message is verbatim (app-server adapter auto-fire).
+  grep -Fxq "125 hello codex" <<< "$sent" || return 1
   # Pi target: pi footer present.
   grep -Fq "124 hello pi" <<< "$sent" || return 1
   grep -Fq "$pi_footer" <<< "$sent" || return 1
-  # Codex target: codex footer present.
-  grep -Fq "125 hello codex" <<< "$sent" || return 1
-  grep -Fq "$codex_footer" <<< "$sent" || return 1
-  # Unknown agent: codex/fallback footer applies.
+  # Unknown agent: fallback footer.
   grep -Fq "126 hello unknown" <<< "$sent" || return 1
-  grep -Fq "mcp__zcrew__zcrew_reply tool" <<< "$sent" || return 1
+  grep -Fq "$codex_footer" <<< "$sent" || return 1
   grep -Fq $'0 \n\nReply from pane-77:\nhello worker' <<< "$sent"
 }
 
@@ -2607,11 +2623,13 @@ test_73_reply_cmd_constant_is_single_source() {
   [[ "$(grep -Fc 'REPLY_CMD' "$ZCREW_BIN")" -ge 3 ]]
 }
 
-test_74_skill_docs_reference_reply_for_workers() {
-  grep -Fq 'zcrew reply "' "$REPO_ROOT/.agents/skills/zcrew/SKILL.md" || return 1
+test_74_skill_docs_reference_reply_mechanisms() {
+  # Each worker type's reply mechanism is documented somewhere in the skills.
+  grep -Fq 'SessionStop hook' "$REPO_ROOT/.agents/skills/zcrew/SKILL.md" || return 1
+  grep -Fq 'app-server adapter' "$REPO_ROOT/.agents/skills/zcrew/SKILL.md" || return 1
+  grep -Fq 'zcrew_reply' "$REPO_ROOT/.agents/skills/zcrew/SKILL.md" || return 1
   grep -Fq 'zcrew reply' "$REPO_ROOT/.claude/skills/zsend/SKILL.md" || return 1
-  grep -Fq 'zcrew reply' "$REPO_ROOT/.pi/skills/zsend/SKILL.md" || return 1
-  grep -Fq 'zcrew reply "' "$REPO_ROOT/.codex/skills/zcrew/SKILL.md"
+  grep -Fq 'zcrew reply' "$REPO_ROOT/.pi/skills/zsend/SKILL.md"
 }
 
 test_75_upgrade_removes_marker_matched_legacy_file_even_if_different() {
@@ -2996,6 +3014,7 @@ main() {
   run_test "42) codex launcher runs inside bx (outer/inner re-entry)" test_42_codex_launcher_runs_inside_bx
   run_test "43) codex launcher forwards model through bx" test_43_codex_launcher_forwards_model_through_bx
   run_test "44) codex launcher does not mutate sandbox config before bx run" test_44_codex_launcher_does_not_mutate_sandbox_config_before_bx_run
+  run_test "44b) claude launcher does not pass --mcp-config (zero MCP for worker)" test_44b_claude_launcher_drops_mcp_config
   run_test "45) install where src == target skips materialization without crashing" test_45_install_self_install_no_crash
   run_test "46) resolve_sender_name_readonly is pure and returns empty for unmapped panes" test_46_resolve_sender_name_readonly_is_pure
   run_test "47) claim_main_for_send promotes host pane to main when main is absent" test_47_claim_main_for_send_promotes_host_when_main_absent
@@ -3037,7 +3056,7 @@ main() {
   run_test "72i) worker reply succeeds after orchestrator claim" test_72i_reply_succeeds_after_orchestrator_claim
   run_test "72j) worker reply with stale main shows claim hint" test_72j_reply_with_stale_main_shows_claim_hint
   run_test "73) REPLY_CMD constant is single-source" test_73_reply_cmd_constant_is_single_source
-  run_test "74) skill docs reference zcrew reply for workers" test_74_skill_docs_reference_reply_for_workers
+  run_test "74) skill docs reference per-agent reply mechanisms" test_74_skill_docs_reference_reply_mechanisms
   run_test "75) upgrade removes marker-matched legacy file even if content differs" test_75_upgrade_removes_marker_matched_legacy_file_even_if_different
   run_test "76) upgrade preserves unmarked user file with warning" test_76_upgrade_preserves_unmarked_user_file_with_warning
   run_test "77) upgrade absent file is no-op without warning" test_77_upgrade_absent_file_is_noop_without_warning
