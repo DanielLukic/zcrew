@@ -2115,11 +2115,10 @@ test_51_send_rejects_worker_to_worker() {
 
 test_52_send_banner_host_only() {
   local d mockbin args_file sent
-  local pi_footer codex_footer
+  local codex_footer
   d="$(new_test_dir 52)"
   mockbin="$d/mock-bin"
   args_file="$d/tell-args.txt"
-  pi_footer=$'Call the zcrew_reply tool with your message.\n\nOnly reply when you have a result, finding, blocker, or question. Never send acknowledgments. Never send to other workers.'
   codex_footer=$'Call the mcp__zcrew__zcrew_reply tool with your message. If unavailable, run `zcrew reply "<your message>"` in your shell.\n\nOnly reply when you have a result, finding, blocker, or question. Never send acknowledgments. Never send to other workers.'
 
   zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
@@ -2138,13 +2137,10 @@ test_52_send_banner_host_only() {
   (cd "$d" && BX_INSIDE=1 PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=77 "$ZCREW_BIN" send main "hello worker" >/dev/null 2>&1) || return 1
 
   sent="$(cat "$args_file")"
-  # Claude target: NO footer — message is verbatim (hook auto-fire).
+  # All managed agents (claude/codex/pi) auto-fire — message is verbatim, no footer.
   grep -Fxq "123 hello claude" <<< "$sent" || return 1
-  # Codex target: NO footer — message is verbatim (app-server adapter auto-fire).
+  grep -Fxq "124 hello pi" <<< "$sent" || return 1
   grep -Fxq "125 hello codex" <<< "$sent" || return 1
-  # Pi target: pi footer present.
-  grep -Fq "124 hello pi" <<< "$sent" || return 1
-  grep -Fq "$pi_footer" <<< "$sent" || return 1
   # Unknown agent: fallback footer.
   grep -Fq "126 hello unknown" <<< "$sent" || return 1
   grep -Fq "$codex_footer" <<< "$sent" || return 1
@@ -2624,10 +2620,10 @@ test_73_reply_cmd_constant_is_single_source() {
 }
 
 test_74_skill_docs_reference_reply_mechanisms() {
-  # Each worker type's reply mechanism is documented somewhere in the skills.
+  # Each worker type's auto-fire mechanism is documented somewhere in the skill.
   grep -Fq 'SessionStop hook' "$REPO_ROOT/.agents/skills/zcrew/SKILL.md" || return 1
   grep -Fq 'app-server adapter' "$REPO_ROOT/.agents/skills/zcrew/SKILL.md" || return 1
-  grep -Fq 'zcrew_reply' "$REPO_ROOT/.agents/skills/zcrew/SKILL.md" || return 1
+  grep -Fq 'agent_end' "$REPO_ROOT/.agents/skills/zcrew/SKILL.md" || return 1
   grep -Fq 'zcrew reply' "$REPO_ROOT/.claude/skills/zsend/SKILL.md" || return 1
   grep -Fq 'zcrew reply' "$REPO_ROOT/.pi/skills/zsend/SKILL.md"
 }

@@ -1446,13 +1446,13 @@ cmd_send() {
   local send_body
   local _tail_only=$'\n\n'"Only reply when you have a result, finding, blocker, or question. Never send acknowledgments. Never send to other workers."
   if [[ -z "${BX_INSIDE:-}" && ! "$message" =~ ^/[a-zA-Z][a-zA-Z0-9_-]*($|[[:space:]]) ]]; then
-    if [[ "$target_agent" == "claude" || "$target_agent" == "codex" ]]; then
-      # Claude has a SessionStop hook that auto-fires the reply.
-      # Codex has an app-server adapter that auto-fires on item/completed.
+    if [[ "$target_agent" == "claude" || "$target_agent" == "codex" || "$target_agent" == "pi" ]]; then
+      # Each managed worker auto-fires replies on its own:
+      #   claude → SessionStop hook
+      #   codex  → app-server adapter on item/completed
+      #   pi     → native extension's agent_end handler
       # Worker just writes its result; no instructions needed.
       send_body="$message"
-    elif [[ "$target_agent" == "pi" ]]; then
-      send_body="${message}"$'\n\n'"Call the zcrew_reply tool with your message.${_tail_only}"
     else
       send_body="${message}"$'\n\n'"Call the mcp__zcrew__zcrew_reply tool with your message. If unavailable, run \`${REPLY_CMD}\` in your shell.${_tail_only}"
     fi

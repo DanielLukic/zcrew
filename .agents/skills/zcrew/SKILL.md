@@ -38,13 +38,13 @@ Each agent type has exactly one reply mechanism — use only that one.
 
 | Worker agent | Reply mechanism | What you do |
 |---|---|---|
-| **claude** | SessionStop hook auto-fires | Just write your result. The hook forwards your last assistant message to main. Don't call any tool. |
-| **codex** | app-server adapter auto-fires | Just write your result. The adapter forwards your last assistant message to main on `item/completed`. Don't call any tool. |
-| **pi** | `zcrew_reply` tool (native pi extension) | Call the `zcrew_reply` tool with your message. |
+| **claude** | SessionStop hook auto-fires | Just write your result. The hook forwards your last assistant message to main. |
+| **codex** | app-server adapter auto-fires | Just write your result. The adapter forwards your last assistant message to main on `item/completed`. |
+| **pi** | `agent_end` handler in native pi extension auto-fires | Just write your result. The extension forwards your last assistant message to main when the agent run completes. |
 
 The orchestrator (host main) uses the MCP tools `zcrew_send` and `zcrew_list` from the project-root `.mcp.json`, with `Bash(zcrew <subcommand> ...)` for spawn / close / rename / sync / claim.
 
-Workers do not have `mcp__zcrew__*` tools exposed — claude and codex use auto-reply and need no tool, pi uses its native extension's `zcrew_reply`. Manual `Bash(zcrew reply ...)` is still possible inside any worker but unnecessary in normal flows.
+Workers have NO zcrew tools exposed — replies forward automatically for all three agent types. Manual `Bash(zcrew reply ...)` is still possible but unnecessary in normal flows.
 
 The `/z*` slash commands are for human users only and are not callable via the Skill tool.
 
@@ -54,7 +54,7 @@ You discuss, plan, delegate, and verify. You do not implement directly. Your job
 
 ### Orchestrator rules
 
-Workers reply to main automatically — claude via SessionStop hook, codex via the app-server adapter, pi via its native `zcrew_reply` tool. You don't need to instruct workers about replies.
+Workers reply to main automatically — claude via SessionStop hook, codex via the app-server adapter, pi via `agent_end` in its native extension. You don't need to instruct workers about replies.
 If a worker reports `no main registered` or `no live main registered`, run `zcrew claim` in your orchestrator pane, then have the worker retry the reply.
 
 - **Run `zcrew claim` on session start** — registers your pane as `main` so workers can reply. Idempotent when you are already main.
