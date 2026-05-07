@@ -16,6 +16,51 @@ import subprocess
 import sys
 from pathlib import Path
 
+
+def inherit_env_from_parent():
+    """Codex/pi spawn the MCP server with a sanitized env. The zcrew CLI
+    and zellij CLI underneath it need a handful of identity / socket-
+    discovery variables to function; walk the parent process tree and
+    copy any of these we lack."""
+    needed = [
+        "ZELLIJ_SESSION_NAME",
+        "ZELLIJ_PANE_ID",
+        "ZELLIJ",
+        "XDG_RUNTIME_DIR",
+        "XDG_DATA_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "BX_INSIDE",
+    ]
+    if all(k in os.environ for k in needed):
+        return
+    pid = os.getppid()
+    for _ in range(12):
+        if pid <= 1:
+            return
+        try:
+            with open(f"/proc/{pid}/environ", "rb") as f:
+                env = dict(
+                    item.decode().split("=", 1)
+                    for item in f.read().split(b"\x00")
+                    if b"=" in item
+                )
+        except OSError:
+            return
+        for k in needed:
+            if k not in os.environ and k in env:
+                os.environ[k] = env[k]
+        if all(k in os.environ for k in needed):
+            return
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                pid = int(f.read().split(") ", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            return
+
+
+inherit_env_from_parent()
+
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_INFO = {"name": "zcrew", "version": "1"}
 
