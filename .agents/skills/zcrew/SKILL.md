@@ -47,6 +47,18 @@ The MCP path avoids bash quoting issues for multi-line messages and gives the ag
 
 Note: workers (`BX_INSIDE=1`) only see `zcrew_reply` over MCP — `zcrew_send` and `zcrew_list` are intentionally not exposed to workers (no paneId discovery, no worker-to-worker side channels). The Bash CLI still enforces the same restrictions.
 
+## Claude SessionStop marker
+
+Claude workers may report completion by placing a marker on the last line of the final assistant message:
+
+`<<DONE: payload>>`
+
+Rules:
+- The marker must be on the last line of the final assistant message. Trailing whitespace is allowed.
+- Payload may be multi-line inside the marker.
+- Literal `>>` inside payload is not supported; parsing ends at the first `>>`.
+- Use exactly one mechanism to report back: either call `zcrew_reply` / `zcrew reply`, or use `<<DONE: ...>>`, never both. Using both sends duplicate replies to main.
+
 The `/z*` slash commands are for human users only and are not callable via the Skill tool.
 
 ## You are the orchestrator
