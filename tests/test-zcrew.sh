@@ -510,8 +510,8 @@ MOCK_ZELLIJ
 
   [[ -f "$args_file" ]] || return 1
   sent="$(sed -n '1p' "$args_file")"
-  [[ "$sent" == 123\ hello\ world* ]] || return 1
-  grep -q '<<DONE: payload>>' "$args_file"
+  # Claude target gets NO footer — message is verbatim.
+  [[ "$sent" == "123 hello world" ]]
 }
 
 test_9b_send_compact_calls_tell_twice_with_delay() {
@@ -540,8 +540,7 @@ test_9b_send_compact_calls_tell_twice_with_delay() {
   first="$(sed -n '1p' "$args_file")"
   second="$(sed -n '2p' "$args_file")"
   [[ "$first" == "123 /compact" ]] || return 1
-  printf '%s\n' "$second" | grep -q '123 hello compact' || return 1
-  grep -q 'zcrew reply' "$args_file"
+  printf '%s\n' "$second" | grep -q '123 hello compact'
 }
 
 test_9c_send_without_compact_calls_tell_once() {
@@ -618,7 +617,8 @@ test_9f_send_path_like_message_keeps_banner_from_host() {
   args_file="$d/tell-args.txt"
 
   zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
-  zcrew_cmd "$d" register buddy --paneId 123 --sessionId s --agent claude --cwd "$d" --pid 1 --status alive >/dev/null 2>&1 || return 1
+  # Use a codex worker because claude no longer gets a footer at all.
+  zcrew_cmd "$d" register buddy --paneId 123 --sessionId s --agent codex --cwd "$d" --pid 1 --status alive >/dev/null 2>&1 || return 1
   prepare_send_test_tools "$d" "$mockbin" "$args_file"
 
   (
@@ -631,7 +631,8 @@ test_9f_send_path_like_message_keeps_banner_from_host() {
 
   sent="$(cat "$args_file")"
   [[ "$sent" == 123\ /path/to/file* ]] || return 1
-  grep -Fq '<<DONE: payload>>' "$args_file"
+  # path-like slash message is treated as regular text, so footer is appended.
+  grep -Fq 'mcp__zcrew__zcrew_reply' "$args_file"
 }
 
 test_10_sync_no_prune_marks_stale_not_delete() {
@@ -2103,11 +2104,10 @@ test_51_send_rejects_worker_to_worker() {
 
 test_52_send_banner_host_only() {
   local d mockbin args_file sent
-  local claude_footer pi_footer codex_footer
+  local pi_footer codex_footer
   d="$(new_test_dir 52)"
   mockbin="$d/mock-bin"
   args_file="$d/tell-args.txt"
-  claude_footer=$'End your final assistant message with `<<DONE: payload>>` on the last line. A SessionStop hook will auto-fire your reply. Manual `zcrew reply "<msg>"` still works if you prefer. Use ONE mechanism, never both.\n\nOnly reply when you have a result, finding, blocker, or question. Never send acknowledgments. Never send to other workers.'
   pi_footer=$'Call the zcrew_reply MCP tool with your message. Manual `zcrew reply "<msg>"` via shell is the fallback if the tool isn\'t available.\n\nOnly reply when you have a result, finding, blocker, or question. Never send acknowledgments. Never send to other workers.'
   codex_footer=$'Call the mcp__zcrew__zcrew_reply tool with your message. If unavailable, run `zcrew reply "<your message>"` in your shell.\n\nOnly reply when you have a result, finding, blocker, or question. Never send acknowledgments. Never send to other workers.'
 
@@ -2127,12 +2127,16 @@ test_52_send_banner_host_only() {
   (cd "$d" && BX_INSIDE=1 PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=77 "$ZCREW_BIN" send main "hello worker" >/dev/null 2>&1) || return 1
 
   sent="$(cat "$args_file")"
-  grep -Fq "123 hello claude" <<< "$sent" || return 1
-  grep -Fq "$claude_footer" <<< "$sent" || return 1
+  # Claude target: NO footer — message is verbatim.
+  grep -Fxq "123 hello claude" <<< "$sent" || return 1
+  ! grep -Fq "Only reply when you have a result" <<< "$(grep -F "123 " <<< "$sent")" || return 1
+  # Pi target: pi footer present.
   grep -Fq "124 hello pi" <<< "$sent" || return 1
   grep -Fq "$pi_footer" <<< "$sent" || return 1
+  # Codex target: codex footer present.
   grep -Fq "125 hello codex" <<< "$sent" || return 1
   grep -Fq "$codex_footer" <<< "$sent" || return 1
+  # Unknown agent: codex/fallback footer applies.
   grep -Fq "126 hello unknown" <<< "$sent" || return 1
   grep -Fq "mcp__zcrew__zcrew_reply tool" <<< "$sent" || return 1
   grep -Fq $'0 \n\nReply from pane-77:\nhello worker' <<< "$sent"
@@ -2174,7 +2178,8 @@ test_54_send_claims_main_after_main_disappears() {
   (cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=88 "$ZCREW_BIN" send helper "hello after restart" >/dev/null 2>&1) || return 1
 
   jq -e '.panes.main.paneId == "88" and (.panes | has("pane-88") | not)' "$d/.zcrew/registry.json" >/dev/null || return 1
-  grep -Fq '<<DONE: payload>>' "$args_file"
+  # Claude target now has NO footer; verify message body landed on tell.
+  grep -Fq 'hello after restart' "$args_file"
 }
 
 test_55_install_migrates_stale_layout_when_single_old_file_exists() {

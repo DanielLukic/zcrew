@@ -1459,7 +1459,7 @@ cmd_send() {
   local _tail_only=$'\n\n'"Only reply when you have a result, finding, blocker, or question. Never send acknowledgments. Never send to other workers."
   if [[ -z "${BX_INSIDE:-}" && ! "$message" =~ ^/[a-zA-Z][a-zA-Z0-9_-]*($|[[:space:]]) ]]; then
     if [[ "$target_agent" == "claude" ]]; then
-      send_body="${message}"$'\n\n'"End your final assistant message with \`<<DONE: payload>>\` on the last line. A SessionStop hook will auto-fire your reply. Manual \`zcrew reply \"<msg>\"\` still works if you prefer. Use ONE mechanism, never both.${_tail_only}"
+      send_body="$message"
     elif [[ "$target_agent" == "pi" ]]; then
       send_body="${message}"$'\n\n'"Call the zcrew_reply MCP tool with your message. Manual \`zcrew reply \"<msg>\"\` via shell is the fallback if the tool isn't available.${_tail_only}"
     else
