@@ -94,7 +94,10 @@ write_codex_sandbox_config() {
     if [[ -f "$config_file" ]]; then
         return 0
     fi
-    printf '[projects."%s"]\ntrust_level = "trusted"\n' "$workdir" > "$config_file"
+    # Disable codex's built-in `apps` feature in fresh sandbox configs:
+    # it auto-loads ~90 mcp__codex_apps__github__* tools that workers do
+    # not need and that pollute the worker tool surface.
+    printf '[projects."%s"]\ntrust_level = "trusted"\n\n[features]\napps = false\n' "$workdir" > "$config_file"
 }
 
 sync_pi_sandbox_settings() {
