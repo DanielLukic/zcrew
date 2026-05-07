@@ -15,5 +15,5 @@ if [[ -d .bx/home ]] && [[ ! -f .bx/home/.claude/settings.json ]]; then
   mkdir -p .bx/home/.claude
   printf '{"skipDangerousModePermissionPrompt":true}\n' > .bx/home/.claude/settings.json
 fi
-cmd=(claude --dangerously-skip-permissions --model "${ZCREW_MODEL:-sonnet}" --setting-sources project,local --strict-mcp-config)
+cmd=(claude --dangerously-skip-permissions --model "${ZCREW_MODEL:-sonnet}" --setting-sources project,local --strict-mcp-config --mcp-config .mcp.json)
 exec bx run "${cmd[@]}"

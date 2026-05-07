@@ -16,7 +16,7 @@ set -euo pipefail
 export NPM_CONFIG_PREFIX="$HOME/.local"
 export PI_PACKAGE_DIR="$HOME/.local/lib/node_modules/@mariozechner/pi-coding-agent"
 
-cmd=(pi --provider openai-codex --no-extensions --no-prompt-templates --no-themes --no-context-files --no-session)
+cmd=(pi --provider openai-codex --no-extensions --no-prompt-templates --no-themes --no-context-files --no-session --mcp-config "$HOME/.pi/agent/mcp.json")
 if [[ -n "${ZCREW_MODEL:-}" ]]; then
   cmd+=(--model "$ZCREW_MODEL")
 fi
