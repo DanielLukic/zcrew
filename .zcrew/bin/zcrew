@@ -347,7 +347,7 @@ zcrew_owned_bin_files() {
 }
 
 zcrew_owned_lib_files() {
-  printf '%s\n' tell mcp_server.py pi-zcrew-ext.ts launchers/claude.sh launchers/codex.sh launchers/pi.sh
+  printf '%s\n' tell mcp_server.py pi-zcrew-ext.ts stop-hook.sh launchers/claude.sh launchers/codex.sh launchers/pi.sh
 }
 
 keep_symlink_target_for() {
@@ -357,6 +357,7 @@ keep_symlink_target_for() {
     lib/zcrew/tell) printf '../../.zcrew/lib/tell\n' ;;
     lib/zcrew/mcp_server.py) printf '../../.zcrew/lib/mcp_server.py\n' ;;
     lib/zcrew/pi-zcrew-ext.ts) printf '../../.zcrew/lib/pi-zcrew-ext.ts\n' ;;
+    lib/zcrew/stop-hook.sh) printf '../../.zcrew/lib/stop-hook.sh\n' ;;
     lib/zcrew/launchers/*) printf '../../../.zcrew/lib/launchers/%s\n' "${rel#lib/zcrew/launchers/}" ;;
     *) return 1 ;;
   esac
@@ -411,6 +412,9 @@ is_zcrew_owned_file() {
       ;;
     lib/zcrew/pi-zcrew-ext.ts)
       grep -q 'pi-native zcrew extension' "$path"
+      ;;
+    lib/zcrew/stop-hook.sh)
+      grep -q '^# zcrew stop-hook' "$path"
       ;;
     lib/zcrew/launchers/claude.sh)
       grep -q '^# zcrew launcher: claude$' "$path" || grep -q -- '--dangerously-skip-permissions' "$path"
