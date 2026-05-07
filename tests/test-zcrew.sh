@@ -1670,8 +1670,10 @@ test_34j_install_seeds_mcp_configs() {
   jq -e '.mcpServers.zcrew.command == "python3"' "$d/.mcp.json" >/dev/null || return 1
   jq -e ".mcpServers.zcrew.args[0] | endswith(\".zcrew/lib/mcp_server.py\")" "$d/.mcp.json" >/dev/null || return 1
   jq -e '.mcpServers.zcrew.command == "python3"' "$d/.bx/home/.pi/agent/mcp.json" >/dev/null || return 1
+  jq -e '.mcpServers.zcrew.env.BX_INSIDE == "1"' "$d/.bx/home/.pi/agent/mcp.json" >/dev/null || return 1
   grep -Fxq '[mcp_servers.zcrew]' "$d/.bx/home/.codex/config.toml" || return 1
-  grep -Fxq 'command = "python3"' "$d/.bx/home/.codex/config.toml"
+  grep -Fxq 'command = "python3"' "$d/.bx/home/.codex/config.toml" || return 1
+  grep -Fxq 'env = { BX_INSIDE = "1" }' "$d/.bx/home/.codex/config.toml"
 }
 
 test_34k_reinstall_preserves_other_mcp_servers() {

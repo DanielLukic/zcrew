@@ -822,17 +822,20 @@ seed_mcp_configs() {
   fi
 
   # Sandbox pi mcp.json (worker view; bx now preserves it across runs).
+  # Pass BX_INSIDE=1 explicitly because some MCP clients sanitize env when
+  # spawning servers — without this the server would start in orchestrator
+  # mode and expose zcrew_send/zcrew_list to workers.
   local pi_mcp="$target/.bx/home/.pi/agent/mcp.json"
   if [[ -d "$target/.bx/home" ]]; then
     mkdir -p "$(dirname "$pi_mcp")"
     tmp=$(mktemp "$pi_mcp.tmp.XXXXXX")
     if [[ -f "$pi_mcp" ]] && jq -e '.mcpServers | type == "object"' "$pi_mcp" >/dev/null 2>&1; then
       jq --arg cmd python3 --arg path "$server_path" \
-        '.mcpServers.zcrew = {command:$cmd, args:[$path]}' \
+        '.mcpServers.zcrew = {command:$cmd, args:[$path], env:{BX_INSIDE:"1"}}' \
         "$pi_mcp" > "$tmp" && mv "$tmp" "$pi_mcp" || rm -f "$tmp"
     else
       jq -n --arg cmd python3 --arg path "$server_path" \
-        '{mcpServers:{zcrew:{command:$cmd, args:[$path]}}}' > "$tmp"
+        '{mcpServers:{zcrew:{command:$cmd, args:[$path], env:{BX_INSIDE:"1"}}}}' > "$tmp"
       mv "$tmp" "$pi_mcp"
     fi
   fi
@@ -841,7 +844,8 @@ seed_mcp_configs() {
   local codex_conf="$target/.bx/home/.codex/config.toml"
   if [[ -d "$target/.bx/home" ]]; then
     mkdir -p "$(dirname "$codex_conf")"
-    local block=$'[mcp_servers.zcrew]\ncommand = "python3"\nargs = ["'"$server_path"'"]'
+    local block
+    printf -v block '[mcp_servers.zcrew]\ncommand = "python3"\nargs = ["%s"]\nenv = { BX_INSIDE = "1" }' "$server_path"
     if [[ -f "$codex_conf" ]] && grep -Fxq '[mcp_servers.zcrew]' "$codex_conf"; then
       tmp=$(mktemp "$codex_conf.tmp.XXXXXX")
       awk -v block="$block" '
