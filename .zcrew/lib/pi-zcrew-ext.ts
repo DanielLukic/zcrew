@@ -1,0 +1,130 @@
+/**
+ * pi-native zcrew extension — replaces pi-mcp-adapter + zcrew MCP server.
+ *
+ * Tool surface is gated by BX_INSIDE:
+ *   worker (BX_INSIDE=1): zcrew_reply
+ *   orchestrator (unset): zcrew_send, zcrew_list
+ *
+ * All tools shell out to the zcrew CLI.
+ */
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { Type } from "typebox";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const execFileAsync = promisify(execFile);
+
+// ---------------------------------------------------------------------------
+// zcrew binary resolution
+// ---------------------------------------------------------------------------
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+const ZCREW_BIN =
+  process.env.ZCREW_BIN ||
+  resolve(__dirname, "../bin/zcrew");
+
+// ---------------------------------------------------------------------------
+// Shell-out helper
+// ---------------------------------------------------------------------------
+
+async function runZcrew(args: string[]): Promise<string> {
+  const { stdout, stderr } = await execFileAsync(ZCREW_BIN, args);
+  const parts = [stdout.trim(), stderr.trim()].filter(Boolean);
+  return parts.join("\n") || "(no output)";
+}
+
+async function runZcrewChecked(args: string[]): Promise<string> {
+  try {
+    return await runZcrew(args);
+  } catch (err: unknown) {
+    const e = err as { stdout?: string; stderr?: string; message?: string };
+    const parts = [(e.stdout || "").trim(), (e.stderr || "").trim()].filter(
+      Boolean,
+    );
+    throw new Error(parts.join("\n") || e.message || String(err));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Pure arg builders (unit-testable)
+// ---------------------------------------------------------------------------
+
+export function replyArgs(p: { message: string }): string[] {
+  return ["reply", p.message];
+}
+
+export function sendArgs(p: {
+  name: string;
+  message: string;
+  compact?: boolean;
+}): string[] {
+  const args = ["send"];
+  if (p.compact) args.push("--compact");
+  args.push(p.name, p.message);
+  return args;
+}
+
+export function listArgs(): string[] {
+  return ["list", "--json"];
+}
+
+// ---------------------------------------------------------------------------
+// Extension factory
+// ---------------------------------------------------------------------------
+
+export default function (pi: ExtensionAPI): void {
+  const isWorker = Boolean(process.env.BX_INSIDE);
+
+  if (isWorker) {
+    // ---- Worker: zcrew_reply only ----
+    pi.registerTool({
+      name: "zcrew_reply",
+      label: "zcrew reply",
+      description:
+        "Send a result, finding, blocker, or question back to main. " +
+        "Worker-only. Target is always main; sender is resolved from " +
+        "your pane id.",
+      parameters: Type.Object({
+        message: Type.String({ minLength: 1 }),
+      }),
+      async execute(_id, params, _signal, _onUpdate, _ctx) {
+        const text = await runZcrewChecked(replyArgs(params));
+        return { content: [{ type: "text", text }] };
+      },
+    });
+  } else {
+    // ---- Orchestrator: zcrew_send + zcrew_list ----
+    pi.registerTool({
+      name: "zcrew_send",
+      label: "zcrew send",
+      description:
+        "Send a message to a registered worker pane by name. " +
+        "Orchestrator-only. Set compact=true to inject /compact " +
+        "before delivery (use when starting a new task on an " +
+        "existing agent).",
+      parameters: Type.Object({
+        name: Type.String({ minLength: 1 }),
+        message: Type.String({ minLength: 1 }),
+        compact: Type.Optional(Type.Boolean()),
+      }),
+      async execute(_id, params, _signal, _onUpdate, _ctx) {
+        const text = await runZcrewChecked(sendArgs(params));
+        return { content: [{ type: "text", text }] };
+      },
+    });
+
+    pi.registerTool({
+      name: "zcrew_list",
+      label: "zcrew list",
+      description: "Return the pane registry as JSON.",
+      parameters: Type.Object({}),
+      async execute(_id, _params, _signal, _onUpdate, _ctx) {
+        const text = await runZcrewChecked(listArgs());
+        return { content: [{ type: "text", text }] };
+      },
+    });
+  }
+}
