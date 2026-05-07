@@ -5,7 +5,7 @@ set -euo pipefail
 # ── test harness ─────────────────────────────────────────────────────
 pass=0 fail=0
 HOOK_DIR="$(cd "$(dirname "$0")"/.. && pwd)"
-HOOK="$HOOK_DIR/stop-hook.sparky.sh"
+HOOK="$HOOK_DIR/.zcrew/lib/stop-hook.sh"
 MOCK_ZCREW_DIR="$(mktemp -d)"
 MOCK_ZCREW="$MOCK_ZCREW_DIR/zcrew"
 TRANSCRIPT_DIR="$(mktemp -d)"
