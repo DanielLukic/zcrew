@@ -62,12 +62,27 @@ run_hook() {
   mkdir -p "$fake_home/.claude/projects/$sanitized"
   ln -s "$session_file" "$fake_home/.claude/projects/$sanitized/$session_id.jsonl"
 
+  BX_INSIDE=1 \
   ZCREW_BIN="$MOCK_ZCREW" \
   CLAUDE_PROJECT_DIR="$PROJECT_DIR" \
   HOME="$fake_home" \
   bash "$HOOK" <<< "{\"session_id\":\"$session_id\"}" 2>/dev/null || true
 
   # Return fake_home for cleanup
+  REPLY_FAKE_HOME="$fake_home"
+}
+
+run_hook_raw_input() {
+  local input_json="${1:-{}}"
+  local fake_home
+  fake_home="$(mktemp -d)"
+
+  BX_INSIDE=1 \
+  ZCREW_BIN="$MOCK_ZCREW" \
+  CLAUDE_PROJECT_DIR="$PROJECT_DIR" \
+  HOME="$fake_home" \
+  bash "$HOOK" <<< "$input_json" 2>/dev/null || true
+
   REPLY_FAKE_HOME="$fake_home"
 }
 
@@ -174,6 +189,7 @@ assert_eq "last assistant tool_use falls back to last assistant text" "reply fro
 reset_calls
 # Feed garbage JSON; hook should exit 0 and not crash
 ZCREW_BIN="$MOCK_ZCREW" \
+BX_INSIDE=1 \
 CLAUDE_PROJECT_DIR="$PROJECT_DIR" \
 bash "$HOOK" <<< "not json at all" 2>/dev/null
 rc=$?
@@ -190,6 +206,7 @@ sanitized="${PROJECT_DIR//\//-}"
 mkdir -p "$fake_home2/.claude/projects/$sanitized"
 # No jsonl file created
 ZCREW_BIN="$MOCK_ZCREW" \
+BX_INSIDE=1 \
 CLAUDE_PROJECT_DIR="$PROJECT_DIR" \
 HOME="$fake_home2" \
 bash "$HOOK" <<< '{"session_id":"sid-missing"}' 2>/dev/null
@@ -211,6 +228,7 @@ sanitized="${PROJECT_DIR//\//-}"
 mkdir -p "$fake_home3/.claude/projects/$sanitized"
 ln -s "$bad_file" "$fake_home3/.claude/projects/$sanitized/sid-bad.jsonl"
 ZCREW_BIN="$MOCK_ZCREW" \
+BX_INSIDE=1 \
 CLAUDE_PROJECT_DIR="$PROJECT_DIR" \
 HOME="$fake_home3" \
 bash "$HOOK" <<< '{"session_id":"sid-bad"}' 2>/dev/null
@@ -262,6 +280,45 @@ assert_eq "one Stop hook entry" "1" "$hooks_count"
 entry_cmd="$(jq -r '.hooks.Stop[0].hooks[0].command' "$settings_file")"
 expected_cmd="$PROJECT_DIR/.zcrew/lib/stop-hook.sh"
 assert_eq "correct hook command" "$expected_cmd" "$entry_cmd"
+
+# ═══════════════════════════════════════════════════════════════════════
+# Test 10: Worker-only guard: BX_INSIDE unset exits 0 without reply
+# ═══════════════════════════════════════════════════════════════════════
+reset_calls
+env -u BX_INSIDE \
+  ZCREW_BIN="$MOCK_ZCREW" \
+  CLAUDE_PROJECT_DIR="$PROJECT_DIR" \
+  bash "$HOOK" <<< '{"session_id":"sid-host","last_assistant_message":"<<DONE: host>>"}' 2>/dev/null
+rc=$?
+assert_eq "host mode exits 0" "0" "$rc"
+assert_no_calls "host mode does not invoke zcrew"
+
+# ═══════════════════════════════════════════════════════════════════════
+# Test 11: last_assistant_message takes precedence over transcript content
+# ═══════════════════════════════════════════════════════════════════════
+reset_calls
+noisy_transcript="$(make_transcript "sid-11" "<<DONE: from transcript>>")"
+noisy_file="$TRANSCRIPT_DIR/sid-11-noisy.jsonl"
+printf '%s' "$noisy_transcript" > "$noisy_file"
+input_json="$(jq -cn \
+  --arg sid "sid-11" \
+  --arg tp "$noisy_file" \
+  --arg msg $'text body\n<<DONE: from stdin>>' \
+  '{session_id:$sid, transcript_path:$tp, last_assistant_message:$msg}')"
+run_hook_raw_input "$input_json"
+rm -rf "${REPLY_FAKE_HOME:-/tmp/noop}"
+assert_eq "stdin last_assistant_message wins" "reply from stdin" "$(reply_calls)"
+
+# ═══════════════════════════════════════════════════════════════════════
+# Test 12: transcript_path from stdin used when last_assistant_message missing
+# ═══════════════════════════════════════════════════════════════════════
+reset_calls
+tp_file="$TRANSCRIPT_DIR/sid-12-transcript.jsonl"
+printf '%s' "$(make_transcript "sid-12" "done"$'\n'"<<DONE: from transcript_path>>")" > "$tp_file"
+input_json="$(jq -cn --arg sid "sid-12" --arg tp "$tp_file" '{session_id:$sid, transcript_path:$tp}')"
+run_hook_raw_input "$input_json"
+rm -rf "${REPLY_FAKE_HOME:-/tmp/noop}"
+assert_eq "transcript_path fallback works" "reply from transcript_path" "$(reply_calls)"
 
 # ═══════════════════════════════════════════════════════════════════════
 # Summary

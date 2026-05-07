@@ -12,6 +12,10 @@
 # NEVER block claude exit.
 set -uo pipefail
 
+hook_input="$(cat 2>/dev/null || true)"
+
+[[ -n "${BX_INSIDE:-}" ]] || exit 0
+
 project_dir="${CLAUDE_PROJECT_DIR:-}"
 if [[ -z "$project_dir" || ! -d "$project_dir/.zcrew" ]]; then
   dir="$PWD"
@@ -34,24 +38,30 @@ if [[ -z "$zcrew_bin" || ! -x "$zcrew_bin" ]]; then
 fi
 [[ -x "$zcrew_bin" ]] || exit 0
 
-hook_input="$(cat 2>/dev/null || true)"
-session_id="$(jq -r '.session_id // .sessionId // empty' <<<"$hook_input" 2>/dev/null || true)"
-[[ -n "$session_id" ]] || exit 0
+assistant_text="$(jq -r '.last_assistant_message // empty' <<<"$hook_input" 2>/dev/null || true)"
 
-sanitized_cwd="${project_dir//\//-}"
-transcript="$HOME/.claude/projects/$sanitized_cwd/$session_id.jsonl"
-[[ -r "$transcript" ]] || exit 0
+if [[ -z "$assistant_text" ]]; then
+  session_id="$(jq -r '.session_id // .sessionId // empty' <<<"$hook_input" 2>/dev/null || true)"
+  [[ -n "$session_id" ]] || exit 0
 
-assistant_text="$(jq -Rrsc '
-  split("\n")
-  | map(select(length > 0) | (try fromjson catch empty))
-  | map(select(.type == "assistant"))
-  | map(select(any(.message.content[]?; .type == "text" and (.text | type == "string"))))
-  | last
-  | .message.content // []
-  | map(select(.type == "text" and (.text | type == "string")) | .text)
-  | join("\n")
-' "$transcript" 2>/dev/null || true)"
+  transcript="$(jq -r '.transcript_path // empty' <<<"$hook_input" 2>/dev/null || true)"
+  if [[ -z "$transcript" ]]; then
+    sanitized_cwd="${project_dir//\//-}"
+    transcript="$HOME/.claude/projects/$sanitized_cwd/$session_id.jsonl"
+  fi
+  [[ -r "$transcript" ]] || exit 0
+
+  assistant_text="$(jq -Rrsc '
+    split("\n")
+    | map(select(length > 0) | (try fromjson catch empty))
+    | map(select(.type == "assistant"))
+    | map(select(any(.message.content[]?; .type == "text" and (.text | type == "string"))))
+    | last
+    | .message.content // []
+    | map(select(.type == "text" and (.text | type == "string")) | .text)
+    | join("\n")
+  ' "$transcript" 2>/dev/null || true)"
+fi
 [[ -n "$assistant_text" ]] || exit 0
 
 payload="$(printf '%s' "$assistant_text" | perl -0777 -e '
