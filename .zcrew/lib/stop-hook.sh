@@ -12,10 +12,8 @@
 # NEVER block claude exit.
 set -uo pipefail
 
-# ── resolve project dir ──────────────────────────────────────────────
 project_dir="${CLAUDE_PROJECT_DIR:-}"
 if [[ -z "$project_dir" || ! -d "$project_dir/.zcrew" ]]; then
-  # Fall back: walk upward from CWD
   dir="$PWD"
   while true; do
     if [[ -d "$dir/.zcrew" ]]; then
@@ -28,33 +26,27 @@ if [[ -z "$project_dir" || ! -d "$project_dir/.zcrew" ]]; then
 fi
 [[ -n "$project_dir" && -d "$project_dir/.zcrew" ]] || exit 0
 
-# ── resolve zcrew binary ─────────────────────────────────────────────
 zcrew_bin="${ZCREW_BIN:-}"
 if [[ -z "$zcrew_bin" || ! -x "$zcrew_bin" ]]; then
-  # Resolve relative to script dir: ../bin/zcrew
   self="${BASH_SOURCE[0]}"
   real_self="$(cd "$(dirname "$self")" && pwd)/$(basename "$self")"
   zcrew_bin="$(cd "$(dirname "$real_self")" && pwd)/../bin/zcrew"
 fi
 [[ -x "$zcrew_bin" ]] || exit 0
 
-# ── read hook input (stdin JSON: {"session_id":"..."}) ──────────────
 hook_input="$(cat 2>/dev/null || true)"
 session_id="$(jq -r '.session_id // .sessionId // empty' <<<"$hook_input" 2>/dev/null || true)"
 [[ -n "$session_id" ]] || exit 0
 
-# ── locate transcript ────────────────────────────────────────────────
 sanitized_cwd="${project_dir//\//-}"
 transcript="$HOME/.claude/projects/$sanitized_cwd/$session_id.jsonl"
 [[ -r "$transcript" ]] || exit 0
 
-# ── extract last assistant text ──────────────────────────────────────
-# Claude Code writes each content block as its own JSONL line.
-# Slurp all lines, filter to assistant role, take the last, extract text blocks.
 assistant_text="$(jq -Rrsc '
   split("\n")
   | map(select(length > 0) | (try fromjson catch empty))
   | map(select(.type == "assistant"))
+  | map(select(any(.message.content[]?; .type == "text" and (.text | type == "string"))))
   | last
   | .message.content // []
   | map(select(.type == "text" and (.text | type == "string")) | .text)
@@ -62,15 +54,6 @@ assistant_text="$(jq -Rrsc '
 ' "$transcript" 2>/dev/null || true)"
 [[ -n "$assistant_text" ]] || exit 0
 
-# ── LAST-line perl check (verbatim from develop) ────────────────────
-# Uses perl to:
-#   1. Trim trailing whitespace from the full assistant text.
-#   2. Find the range of the final line.
-#   3. Find all <<DONE: ...>> markers, keep the last one.
-#   4. Verify the last marker's span overlaps with the final line range.
-#   5. Print the payload to stdout (exit 0), or exit 0 silently.
-#
-# No target= capture (removed from develop's variant).
 payload="$(printf '%s' "$assistant_text" | perl -0777 -e '
   use strict;
   use warnings;
@@ -97,6 +80,5 @@ payload="$(printf '%s' "$assistant_text" | perl -0777 -e '
 ' 2>/dev/null || true)"
 [[ -n "$payload" ]] || exit 0
 
-# ── fire zcrew reply ─────────────────────────────────────────────────
 "$zcrew_bin" reply "$payload" >/dev/null 2>&1 || true
 exit 0
