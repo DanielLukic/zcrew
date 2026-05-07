@@ -118,6 +118,11 @@ assert(source.includes('return ["reply", p.message];'), "source contains replyAr
 assert(source.includes('args.push("--compact")'), "source contains sendArgs compact flag");
 assert(source.includes('return ["list", "--json"];'), "source contains listArgs impl");
 
+// Worker auto-fire: extension subscribes to agent_end and shells reply.
+assert(source.includes('pi.on("agent_end"'), "worker registers agent_end handler");
+// Worker no longer registers a tool; only orchestrator does (zcrew_send / zcrew_list).
+assert(!source.includes('name: "zcrew_reply"'), "worker does NOT register zcrew_reply tool");
+
 // ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------

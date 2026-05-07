@@ -2,7 +2,7 @@
  * pi-native zcrew extension — replaces pi-mcp-adapter + zcrew MCP server.
  *
  * Tool surface is gated by BX_INSIDE:
- *   worker (BX_INSIDE=1): zcrew_reply
+ *   worker (BX_INSIDE=1): no tools; auto-reply via agent_end
  *   orchestrator (unset): zcrew_send, zcrew_list
  *
  * All tools shell out to the zcrew CLI.
@@ -75,25 +75,34 @@ export function listArgs(): string[] {
 // Extension factory
 // ---------------------------------------------------------------------------
 
+type PiContentPart = { type?: string; text?: string };
+type PiAgentMessage = {
+  role?: string;
+  stopReason?: string;
+  content?: PiContentPart[];
+};
+type PiAgentEndEvent = { messages?: PiAgentMessage[] };
+
 export default function (pi: ExtensionAPI): void {
   const isWorker = Boolean(process.env.BX_INSIDE);
 
   if (isWorker) {
-    // ---- Worker: zcrew_reply only ----
-    pi.registerTool({
-      name: "zcrew_reply",
-      label: "zcrew reply",
-      description:
-        "Send a result, finding, blocker, or question back to main. " +
-        "Worker-only. Target is always main; sender is resolved from " +
-        "your pane id.",
-      parameters: Type.Object({
-        message: Type.String({ minLength: 1 }),
-      }),
-      async execute(_id, params, _signal, _onUpdate, _ctx) {
-        const text = await runZcrewChecked(replyArgs(params));
-        return { content: [{ type: "text", text }] };
-      },
+    // Worker path: auto-fire reply on agent_end.
+    pi.on("agent_end", async (event: PiAgentEndEvent) => {
+      const messages = event.messages ?? [];
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const msg = messages[i];
+        if (msg?.role !== "assistant") continue;
+        if (msg.stopReason === "aborted" && !(msg.content?.length)) continue;
+        const text = (msg.content ?? [])
+          .filter((c) => c?.type === "text" && typeof c.text === "string")
+          .map((c) => c.text ?? "")
+          .join("")
+          .trim();
+        if (!text) continue;
+        await runZcrew(replyArgs({ message: text })).catch(() => {});
+        return;
+      }
     });
   } else {
     // ---- Orchestrator: zcrew_send + zcrew_list ----
