@@ -799,6 +799,95 @@ live_pane_ids() {
   zellij action list-panes 2>/dev/null | sed -n 's/.*terminal_\([0-9][0-9]*\).*/\1/p'
 }
 
+# ── codex worker state cleanup ──────────────────────────────────────────
+# Codex workers run as 3-process trees inside bx (--unshare-pid). PIDs in
+# the inner pid files are namespace-relative and useless from outside; the
+# outer launcher writes its own host-visible PID to outer.pid before
+# exec-ing into bx so external cleanup can kill bwrap → kernel SIGKILLs
+# everything inside.
+
+read_pid_file() {
+  local pid_file="$1"
+  [[ -f "$pid_file" ]] || return 1
+  local pid
+  pid="$(tr -dc '0-9' < "$pid_file" || true)"
+  [[ -n "$pid" ]] || return 1
+  printf '%s\n' "$pid"
+}
+
+is_expected_outer_pid() {
+  local pid="$1"
+  local cmdline
+  cmdline="$(ps -p "$pid" -o cmd= 2>/dev/null || true)"
+  [[ -n "$cmdline" ]] || return 1
+  [[ "$cmdline" == *"codex.sh"* ]] || return 1
+  [[ "$cmdline" == *"--zcrew-inner-codex-launcher"* || "$cmdline" == *"bx run"* || "$cmdline" == *"bash"* ]]
+}
+
+kill_outer_pid_if_safe() {
+  local pane_id="$1"
+  local outer_pid_file="$PROJECT_DIR/.zcrew/state/codex-worker/$pane_id/outer.pid"
+  local pid
+  pid="$(read_pid_file "$outer_pid_file" || true)"
+  [[ -n "$pid" ]] || return 0
+  if ! kill -0 "$pid" 2>/dev/null; then
+    return 0
+  fi
+  if ! is_expected_outer_pid "$pid"; then
+    logger "gc" "warn" "skip kill for unexpected outer pid paneId=$pane_id pid=$pid"
+    return 0
+  fi
+  kill "$pid" 2>/dev/null || true
+  local deadline=$((SECONDS + 3))
+  while kill -0 "$pid" 2>/dev/null; do
+    if (( SECONDS >= deadline )); then
+      kill -9 "$pid" 2>/dev/null || true
+      break
+    fi
+    sleep 0.1
+  done
+}
+
+walk_codex_worker_orphans() {
+  local mode="${1:-safe}"
+  local now
+  now=$(date +%s)
+  local live_json='[]'
+  if [[ "$mode" != "force" ]]; then
+    local live_lines
+    live_lines="$(live_pane_ids 2>/dev/null || true)"
+    live_json=$(printf '%s\n' "$live_lines" | jq -Rsc 'split("\n") | map(select(length>0))')
+    if [[ "$live_json" == "[]" ]]; then
+      logger "gc" "warn" "skip orphan walk: empty live pane list"
+      return 0
+    fi
+  fi
+  local root="$PROJECT_DIR/.zcrew/state/codex-worker"
+  [[ -d "$root" ]] || return 0
+  local pane_path pane_id mtime age
+  shopt -s nullglob
+  for pane_path in "$root"/*; do
+    [[ -d "$pane_path" ]] || continue
+    pane_id="$(basename "$pane_path")"
+    if [[ "$mode" != "force" ]]; then
+      if jq -e --arg id "$pane_id" 'index($id) != null' <<< "$live_json" >/dev/null; then
+        continue
+      fi
+    else
+      mtime=$(stat -c %Y "$pane_path" 2>/dev/null || echo 0)
+      age=$((now - mtime))
+      if (( age < 30 )); then
+        logger "gc" "info" "skip fresh state dir paneId=$pane_id age=${age}s"
+        continue
+      fi
+    fi
+    kill_outer_pid_if_safe "$pane_id"
+    rm -rf "$pane_path"
+    logger "gc" "info" "cleaned orphan codex worker state paneId=$pane_id mode=$mode"
+  done
+  shopt -u nullglob
+}
+
 cmd_unregister() {
   CURRENT_SUBCMD="unregister"
   require_project
@@ -1372,6 +1461,15 @@ cmd_close() {
     [[ -n "$close_err" ]] && echo "$close_err" >&2
   fi
 
+  # Codex worker bookkeeping: kill bwrap (host-visible outer.pid) and
+  # remove the per-pane state dir. No-op for non-codex panes (state dir
+  # only exists for codex workers).
+  local codex_state_dir="$PROJECT_DIR/.zcrew/state/codex-worker/$pane_id"
+  if [[ -d "$codex_state_dir" ]]; then
+    kill_outer_pid_if_safe "$pane_id"
+    rm -rf "$codex_state_dir"
+  fi
+
   "$0" unregister "$name"
   logger "close" "info" "closed name=$name paneId=$pane_id"
   echo "closed: $name ($pane_id)"
@@ -1585,6 +1683,28 @@ reconcile_registry_with_zellij() {
     --argjson live "$live_json" \
     --arg prune "$prune" \
     --arg now "$now"
+
+  walk_codex_worker_orphans "safe"
+}
+
+cmd_gc() {
+  CURRENT_SUBCMD="gc"
+  require_project
+  [[ -n "${BX_INSIDE:-}" ]] && return 0
+  local force="false"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --force) force="true" ;;
+      *) echo "Usage: zcrew gc [--force]" >&2; exit 1 ;;
+    esac
+    shift
+  done
+  if [[ "$force" == "true" ]]; then
+    walk_codex_worker_orphans "force"
+  else
+    walk_codex_worker_orphans "safe"
+  fi
+  echo "gc complete"
 }
 
 cmd_sync() {
@@ -1634,6 +1754,7 @@ main() {
     claim) dispatch_registry_command cmd_claim "$@" ;;
     list) dispatch_registry_command cmd_list "$@" ;;
     sync) cmd_sync "$@" ;;
+    gc) cmd_gc "$@" ;;
     *)
       cat <<USAGE
 Usage: zcrew <command>
@@ -1649,6 +1770,7 @@ Commands:
   claim [--replace]
   list [--json]
   sync [--keep-stale|--prune]
+  gc [--force]
   register <name> [--paneId X] [--sessionId Y] [--agent A] [--cwd P] [--pid N] [--status S]
 USAGE
       exit 1

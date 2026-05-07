@@ -1,3 +1,4 @@
+
 #!/usr/bin/env bash
 # zcrew-managed
 # codex launcher with app-server sidecar + auto-reply adapter while keeping TUI visible.
@@ -7,15 +8,19 @@ project_dir="$PWD"
 [[ -d "$project_dir/bin" ]] && export PATH="$project_dir/bin:$PATH"
 cd "$project_dir"
 
+pane_id="${ZELLIJ_PANE_ID:-$$}"
+state_dir="$project_dir/.zcrew/state/codex-worker/$pane_id"
+
 # Keep all codex worker processes inside bx. Outer launcher re-enters itself
 # under bx; inner launcher orchestrates app-server + adapter + TUI.
 if [[ "${1:-}" != "--zcrew-inner-codex-launcher" ]]; then
+  mkdir -p "$state_dir"
+  # Host-visible PID for killing the entire bwrap namespace from outside.
+  printf '%s\n' "$$" > "$state_dir/outer.pid"
   exec bx run -- bash "$0" --zcrew-inner-codex-launcher
 fi
 
-pane_id="${ZELLIJ_PANE_ID:-$$}"
 session_name="${ZELLIJ_SESSION_NAME:-default}"
-state_dir="$project_dir/.zcrew/state/codex-worker/$pane_id"
 mkdir -p "$state_dir"
 
 app_pid_file="$state_dir/app-server.pid"
