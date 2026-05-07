@@ -34,9 +34,20 @@ Reconciles the registry with live panes. Human users can also run `/zsync`.
 
 ## How to invoke from an agent
 
-Use the Bash tool with full arguments, not slash commands. The `/z*` slash commands are for human users only and are not callable via the Skill tool.
+Prefer the native MCP tools when your agent exposes them. Fall back to Bash if a tool is unavailable.
 
-Example: `Bash(zcrew send claudio "hello world")`
+| Action | MCP tool (preferred) | Bash fallback |
+|---|---|---|
+| Send to a worker (orchestrator) | `zcrew_send` (`name`, `message`, optional `compact`) | `Bash(zcrew send [--compact] <name> "<message>")` |
+| Reply to main (worker) | `zcrew_reply` (`message`) | `Bash(zcrew reply "<message>")` |
+| List the pane registry | `zcrew_list` | `Bash(zcrew list --json)` |
+| Spawn / close / rename / sync / claim | — | `Bash(zcrew <subcommand> ...)` |
+
+The MCP path avoids bash quoting issues for multi-line messages and gives the agent typed args. The CLI is still the source of truth — MCP tools shell out to it, so registry behaviour, identity, and BX_INSIDE guards are identical.
+
+Note: workers (`BX_INSIDE=1`) only see `zcrew_reply` over MCP — `zcrew_send` and `zcrew_list` are intentionally not exposed to workers (no paneId discovery, no worker-to-worker side channels). The Bash CLI still enforces the same restrictions.
+
+The `/z*` slash commands are for human users only and are not callable via the Skill tool.
 
 ## You are the orchestrator
 
@@ -44,7 +55,7 @@ You discuss, plan, delegate, and verify. You do not implement directly. Your job
 
 ### Orchestrator rules
 
-When a worker needs to report back to main, use `zcrew reply "<message>"`.
+When a worker needs to report back to main, use the `zcrew_reply` MCP tool (or `Bash(zcrew reply "<message>")` if MCP is unavailable).
 If a worker reports `no main registered` or `no live main registered`, run `zcrew claim` in your orchestrator pane, then have the worker retry the reply.
 
 - **Run `zcrew claim` on session start** — registers your pane as `main` so workers can reply. Idempotent when you are already main.
