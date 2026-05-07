@@ -1,15 +1,7 @@
 #!/usr/bin/env bash
-# zcrew stop-hook
-# Claude SessionStop hook: auto-fires `zcrew reply <payload>` when the last
-# assistant message ends with `<<DONE: payload>>`.
-#
-# Stripped port of develop's lib/zcrew/claude/stop-hook.sh. Differences:
-# - No outbox/feed call → uses `zcrew reply "$payload"` (our existing CLI).
-# - No target= variant → only `<<DONE: payload>>` (always targets main).
-# - No ZCREW_ME / current.json sender resolution (we always reply to main).
-#
-# Fail-closed: every parse/lookup/transcript failure exits 0. The hook must
-# NEVER block claude exit.
+# zcrew stop-hook (simplified)
+# Claude SessionStop hook: auto-fires `zcrew reply <assistant_text>` when the
+# last assistant message contains text. No DONE marker parsing.
 set -uo pipefail
 
 hook_input="$(cat 2>/dev/null || true)"
@@ -62,33 +54,7 @@ if [[ -z "$assistant_text" ]]; then
     | join("\n")
   ' "$transcript" 2>/dev/null || true)"
 fi
+
 [[ -n "$assistant_text" ]] || exit 0
-
-payload="$(printf '%s' "$assistant_text" | perl -0777 -e '
-  use strict;
-  use warnings;
-
-  my $text = do { local $/; <STDIN> };
-  my $trim = $text;
-  $trim =~ s/\s+\z//s;
-  exit 0 if $trim eq q{};
-
-  my $line_start = rindex($trim, "\n");
-  $line_start = ($line_start < 0) ? 0 : ($line_start + 1);
-  my $line_end = length($trim);
-
-  my @last;
-  while ($text =~ /<<DONE:\s*(.*?)>>/gs) {
-    @last = ($1, $-[0], $+[0]);
-  }
-  exit 0 unless @last;
-
-  my ($payload, $start, $end) = @last;
-  exit 0 if $end <= $line_start || $start >= $line_end;
-
-  print $payload;
-' 2>/dev/null || true)"
-[[ -n "$payload" ]] || exit 0
-
-"$zcrew_bin" reply "$payload" >/dev/null 2>&1 || true
+"$zcrew_bin" reply "$assistant_text" >/dev/null 2>&1 || true
 exit 0
