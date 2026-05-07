@@ -1660,6 +1660,36 @@ test_34i_reinstall_preserves_existing_team_conf() {
   grep -Fxq "$marker" "$d/.zcrew/team.conf"
 }
 
+test_34j_install_seeds_mcp_configs() {
+  local d
+  d="$(new_test_dir 34j)"
+  mkdir -p "$d"
+
+  zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
+
+  jq -e '.mcpServers.zcrew.command == "python3"' "$d/.mcp.json" >/dev/null || return 1
+  jq -e ".mcpServers.zcrew.args[0] | endswith(\".zcrew/lib/mcp_server.py\")" "$d/.mcp.json" >/dev/null || return 1
+  jq -e '.mcpServers.zcrew.command == "python3"' "$d/.bx/home/.pi/agent/mcp.json" >/dev/null || return 1
+  grep -Fxq '[mcp_servers.zcrew]' "$d/.bx/home/.codex/config.toml" || return 1
+  grep -Fxq 'command = "python3"' "$d/.bx/home/.codex/config.toml"
+}
+
+test_34k_reinstall_preserves_other_mcp_servers() {
+  local d
+  d="$(new_test_dir 34k)"
+  mkdir -p "$d"
+
+  zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
+  # User adds a custom MCP server alongside zcrew.
+  jq '.mcpServers.userserver = {command: "echo", args: ["hello"]}' "$d/.mcp.json" > "$d/.mcp.json.tmp" || return 1
+  mv "$d/.mcp.json.tmp" "$d/.mcp.json"
+
+  zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
+
+  jq -e '.mcpServers.userserver.command == "echo"' "$d/.mcp.json" >/dev/null || return 1
+  jq -e '.mcpServers.zcrew.command == "python3"' "$d/.mcp.json" >/dev/null
+}
+
 test_35_send_claude_target_refreshes_auth_files() {
   local d target_cwd target_home mockbin args_file host_home before_json before_creds after_json after_creds
   d="$(new_test_dir 35)"
@@ -2938,6 +2968,8 @@ main() {
   run_test "34g) install writes AGENTS.md only when CLAUDE.md already exists" test_34g_install_writes_agents_only_when_claude_exists
   run_test "34h) install seeds .zcrew/team.conf template" test_34h_install_seeds_team_conf_template
   run_test "34i) reinstall preserves existing .zcrew/team.conf" test_34i_reinstall_preserves_existing_team_conf
+  run_test "34j) install seeds .mcp.json + sandbox MCP configs" test_34j_install_seeds_mcp_configs
+  run_test "34k) reinstall preserves other MCP servers in .mcp.json" test_34k_reinstall_preserves_other_mcp_servers
   run_test "35) send to claude target refreshes auth in .bx/home" test_35_send_claude_target_refreshes_auth_files
   run_test "36) send to codex target skips claude auth refresh" test_36_send_codex_target_skips_claude_auth_refresh
   run_test "37) send to unknown target skips claude auth refresh" test_37_send_unknown_target_skips_claude_auth_refresh

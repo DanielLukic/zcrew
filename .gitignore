@@ -22,3 +22,4 @@ TODO.md
 # Linear skill vendored binary
 .claude/skills/linear/vendor/
 !.claude/skills/linear/vendor/.gitkeep
+.mcp.json
