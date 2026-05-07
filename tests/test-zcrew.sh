@@ -82,6 +82,7 @@ set -euo pipefail
 LIST_OUTPUT="${MOCK_ZELLIJ_LIST_OUTPUT:-}"
 CHILD_PANE_ID="${MOCK_ZELLIJ_CHILD_PANE_ID:-777}"
 LIST_SESSIONS_OUTPUT="${MOCK_ZELLIJ_SESSIONS_OUTPUT:-test-session}"
+CLOSE_LOG_FILE="${MOCK_ZELLIJ_CLOSE_LOG_FILE:-}"
 
 case "${1:-}" in
   list-sessions)
@@ -92,6 +93,11 @@ case "${1:-}" in
     case "${1:-}" in
       list-panes)
         printf '%s\n' "$LIST_OUTPUT"
+        ;;
+      close-pane)
+        if [[ -n "$CLOSE_LOG_FILE" ]]; then
+          printf '%s\n' "$*" >> "$CLOSE_LOG_FILE"
+        fi
         ;;
       new-pane)
         # find "--" and execute the command after it as the spawned pane.
@@ -2921,6 +2927,103 @@ test_83b_bx_ro_mount_blocks_managed_bx_files_but_home_stays_writable() {
   ! printf '%s\n' "$out" | grep -Fq 'unexpectedly writable:'
 }
 
+# ── Codex auto-reply hardening: state cleanup tests ─────────────────────
+
+test_84_close_kills_outer_pid_and_removes_state_dir() {
+  local d mockbin close_log state_dir pane_pid
+  d="$(new_test_dir 84)"
+  mockbin="$d/mock-bin"
+  close_log="$d/close.log"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register coder --paneId 125 --sessionId s125 --agent codex --cwd "$d" --pid 4 --status alive >/dev/null 2>&1 || return 1
+  make_mock_zellij "$mockbin"
+
+  state_dir="$d/.zcrew/state/codex-worker/125"
+  mkdir -p "$state_dir"
+  bash -c 'exec -a "bash codex.sh" sleep 60' &
+  pane_pid=$!
+  printf '%s\n' "$pane_pid" > "$state_dir/outer.pid"
+
+  (cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_ZELLIJ_CLOSE_LOG_FILE="$close_log" "$ZCREW_BIN" close coder >/dev/null 2>&1) || { kill "$pane_pid" 2>/dev/null; return 1; }
+
+  ! kill -0 "$pane_pid" 2>/dev/null || { kill "$pane_pid" 2>/dev/null; return 1; }
+  [[ ! -d "$state_dir" ]] || return 1
+  grep -Fq 'close-pane -p 125' "$close_log"
+}
+
+test_85_reconcile_orphan_walk_cleans_not_live_preserves_live() {
+  local d mockbin dead_dir live_dir dead_pid live_pid
+  d="$(new_test_dir 85)"
+  mockbin="$d/mock-bin"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  make_mock_zellij "$mockbin"
+
+  dead_dir="$d/.zcrew/state/codex-worker/888"
+  live_dir="$d/.zcrew/state/codex-worker/777"
+  mkdir -p "$dead_dir" "$live_dir"
+  bash -c 'exec -a "bash codex.sh" sleep 60' & dead_pid=$!
+  bash -c 'exec -a "bash codex.sh" sleep 60' & live_pid=$!
+  printf '%s\n' "$dead_pid" > "$dead_dir/outer.pid"
+  printf '%s\n' "$live_pid" > "$live_dir/outer.pid"
+
+  (cd "$d" && env -u BX_INSIDE ZCREW_AUTO_SYNC=1 PATH="$mockbin:$PATH" MOCK_ZELLIJ_LIST_OUTPUT='terminal_777' ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=0 "$ZCREW_BIN" list --json >/dev/null 2>&1) || { kill "$dead_pid" "$live_pid" 2>/dev/null; return 1; }
+
+  if kill -0 "$dead_pid" 2>/dev/null; then kill "$dead_pid" "$live_pid" 2>/dev/null; return 1; fi
+  if ! kill -0 "$live_pid" 2>/dev/null; then kill "$live_pid" 2>/dev/null; return 1; fi
+  kill "$live_pid" 2>/dev/null
+  [[ ! -d "$dead_dir" ]] || return 1
+  [[ -d "$live_dir" ]]
+}
+
+test_86_gc_force_ignores_live_filter_but_respects_freshness() {
+  local d mockbin old_dir new_dir old_pid new_pid
+  d="$(new_test_dir 86)"
+  mockbin="$d/mock-bin"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  make_mock_zellij "$mockbin"
+
+  old_dir="$d/.zcrew/state/codex-worker/901"
+  new_dir="$d/.zcrew/state/codex-worker/902"
+  mkdir -p "$old_dir" "$new_dir"
+  bash -c 'exec -a "bash codex.sh" sleep 60' & old_pid=$!
+  bash -c 'exec -a "bash codex.sh" sleep 60' & new_pid=$!
+  printf '%s\n' "$old_pid" > "$old_dir/outer.pid"
+  printf '%s\n' "$new_pid" > "$new_dir/outer.pid"
+  touch -d '2 minutes ago' "$old_dir"
+
+  (cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" "$ZCREW_BIN" gc --force >/dev/null 2>&1) || { kill "$old_pid" "$new_pid" 2>/dev/null; return 1; }
+
+  if kill -0 "$old_pid" 2>/dev/null; then kill "$old_pid" "$new_pid" 2>/dev/null; return 1; fi
+  if ! kill -0 "$new_pid" 2>/dev/null; then kill "$new_pid" 2>/dev/null; return 1; fi
+  kill "$new_pid" 2>/dev/null
+  [[ ! -d "$old_dir" ]] || return 1
+  [[ -d "$new_dir" ]]
+}
+
+test_87_reconcile_empty_live_skips_orphan_walk() {
+  local d mockbin state_dir pid
+  d="$(new_test_dir 87)"
+  mockbin="$d/mock-bin"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register alive --paneId 77 --sessionId s77 --agent unknown --cwd "$d" --pid 77 --status alive >/dev/null 2>&1 || return 1
+  make_mock_zellij "$mockbin"
+
+  state_dir="$d/.zcrew/state/codex-worker/999"
+  mkdir -p "$state_dir"
+  bash -c 'exec -a "bash codex.sh" sleep 60' & pid=$!
+  printf '%s\n' "$pid" > "$state_dir/outer.pid"
+
+  (cd "$d" && env -u BX_INSIDE ZCREW_AUTO_SYNC=1 PATH="$mockbin:$PATH" MOCK_ZELLIJ_LIST_OUTPUT='' ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=0 "$ZCREW_BIN" list --json >/dev/null 2>&1) || { kill "$pid" 2>/dev/null; return 1; }
+
+  if ! kill -0 "$pid" 2>/dev/null; then return 1; fi
+  kill "$pid" 2>/dev/null
+  [[ -d "$state_dir" ]]
+}
+
 main() {
   mkdir -p "$TEST_ROOT"
 
@@ -3068,6 +3171,10 @@ main() {
   run_test "82d) install mount block includes managed bx files ro" test_82d_install_mount_block_includes_managed_bx_files_ro
   run_test "83) bx RO mount blocks .zcrew bin/lib while runtime state stays writable" test_83_bx_ro_mount_blocks_zcrew_bin_and_lib_but_runtime_state_stays_writable
   run_test "83b) bx RO mount blocks managed bx files while HOME stays writable" test_83b_bx_ro_mount_blocks_managed_bx_files_but_home_stays_writable
+  run_test "84) close kills outer.pid and removes codex worker state dir" test_84_close_kills_outer_pid_and_removes_state_dir
+  run_test "85) reconcile orphan walk cleans not-live, preserves live" test_85_reconcile_orphan_walk_cleans_not_live_preserves_live
+  run_test "86) gc --force ignores live filter, preserves fresh dirs" test_86_gc_force_ignores_live_filter_but_respects_freshness
+  run_test "87) reconcile with empty live list skips orphan walk" test_87_reconcile_empty_live_skips_orphan_walk
 
   echo ""
   echo "Total: $PASS_COUNT PASS, $FAIL_COUNT FAIL"

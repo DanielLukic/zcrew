@@ -31,6 +31,12 @@ cat > "$PROJECT/mockbin/bx" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
 echo "$*" >> "${MOCK_BX_ARGS:?}"
+: "${MOCK_OUTER_PID_FILE:?}"
+# Outer launcher must have written outer.pid BEFORE invoking bx.
+if [[ ! -f "$MOCK_OUTER_PID_FILE" ]]; then
+  echo "outer.pid missing before bx re-entry" >&2
+  exit 9
+fi
 if [[ "${1:-}" != "run" ]]; then
   exit 2
 fi
@@ -78,6 +84,7 @@ chmod +x "$PROJECT/mockbin/codex"
 export PATH="$PROJECT/mockbin:$PATH"
 export MOCK_EVENTS="$EVENTS"
 export MOCK_BX_ARGS="$BX_ARGS"
+export MOCK_OUTER_PID_FILE="$PROJECT/.zcrew/state/codex-worker/44/outer.pid"
 export ZELLIJ_PANE_ID="44"
 export ZELLIJ_SESSION_NAME="sess"
 
@@ -88,6 +95,9 @@ export ZELLIJ_SESSION_NAME="sess"
 
 state_dir="$PROJECT/.zcrew/state/codex-worker/44"
 [[ -f "$state_dir/port" ]] || { echo "missing port file"; exit 1; }
+[[ -f "$state_dir/outer.pid" ]] || { echo "missing outer.pid"; exit 1; }
+outer_pid="$(cat "$state_dir/outer.pid")"
+[[ "$outer_pid" =~ ^[0-9]+$ ]] || { echo "invalid outer.pid: $outer_pid"; exit 1; }
 
 # Order: app-server -> adapter -> tui
 actual="$(cat "$EVENTS")"
