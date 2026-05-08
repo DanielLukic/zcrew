@@ -46,6 +46,8 @@ The orchestrator (host main) uses the MCP tools `zcrew_send` and `zcrew_list` fr
 
 Workers have NO zcrew tools exposed — replies forward automatically for all three agent types. Manual `Bash(zcrew reply ...)` is still possible but unnecessary in normal flows.
 
+Workers also export `AI_KIND` (`claude`, `codex`, `pi`) so worker-side tooling can identify the active agent type without probing process names.
+
 The `/z*` slash commands are for human users only and are not callable via the Skill tool.
 
 ## You are the orchestrator
@@ -98,7 +100,7 @@ If `.zcrew/team.conf` is missing, use this default template:
 |---|---|---|---|
 | **claudio** | claude (sonnet) | assistant / researcher | Deep research, nuanced analysis, thorough code review, design docs, multi-file investigation |
 | **sam** | codex (gpt-5.4) | reviewer | Fast code review, strict TDD, catches bugs, focused critique |
-| **sparky** | codex (gpt-5.4) | implementer | Fast implementation, TDD discipline, cranks through well-scoped tasks |
-| **piper** | pi (gpt-5.3-codex) | optional alternative model agent | Use as a second-opinion implementer or to cross-check sparky's work with a different model |
+| **sparky** | codex (gpt-5.3-codex) | implementer | Fast implementation, TDD discipline, cranks through well-scoped tasks |
+| **piper** | pi (glm-5.1) | optional alternative model agent | Use as a second-opinion implementer or to cross-check sparky's work with a different model |
 
 Learn the strengths of your agents by testing with various tasks. However, if your agent is a gpt-5.3-codex or similar, let it code — not research. Sonnet and bigger models can do everything, but ideally don't waste them on straightforward implementation work. Find the structure that works for your project.

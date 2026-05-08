@@ -4,11 +4,16 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ADAPTER = path.resolve(__dirname, '..', '..', '.zcrew/lib/codex-auto-reply.mjs');
+const ADAPTER = process.env.ADAPTER_PATH || path.resolve(__dirname, '..', '..', '.zcrew/lib/codex-auto-reply.mjs');
 const caseName = process.env.CASE_NAME;
 const callsFile = process.env.CALLS_FILE;
+const rpcCallsFile = process.env.RPC_CALLS_FILE;
 const debug = process.env.DEBUG_CASE === '1';
-if (!caseName || !callsFile) throw new Error('CASE_NAME and CALLS_FILE required');
+if (!caseName || !callsFile || !rpcCallsFile) throw new Error('CASE_NAME, CALLS_FILE and RPC_CALLS_FILE required');
+
+function recordRpcCall(method, params) {
+  fs.appendFileSync(rpcCallsFile, `${JSON.stringify({ method, params })}\n`);
+}
 
 class FakeSocket {
   constructor(server) {
@@ -45,53 +50,69 @@ class FakeSocket {
 
 const scripts = {
   one: {
-    afterInitialize: (sock) => {
-      sock.serverSend({ jsonrpc: '2.0', method: 'turn/started', params: { threadId: 'th1', turn: { id: 'tu1' } } });
-      sock.serverSend({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'th1', turnId: 'tu1', item: { type: 'agentMessage', text: 'hello' } } });
-      sock.serverSend({ jsonrpc: '2.0', method: 'turn/completed', params: { threadId: 'th1', turn: { id: 'tu1' } } });
-    },
+    threadStarted: 'th1',
+    idleThread: 'th1',
+    onThreadRead: () => ({
+      thread: { turns: [{ id: 'tu1', status: { type: 'completed' }, items: [{ type: 'agentMessage', text: 'hello' }] }] },
+    }),
   },
   multi: {
-    afterInitialize: (sock) => {
-      sock.serverSend({ jsonrpc: '2.0', method: 'turn/started', params: { threadId: 'th1', turn: { id: 'tu1' } } });
-      sock.serverSend({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'th1', turnId: 'tu1', item: { type: 'agentMessage', text: 'first' } } });
-      sock.serverSend({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'th1', turnId: 'tu1', item: { type: 'agentMessage', text: 'second' } } });
-      sock.serverSend({ jsonrpc: '2.0', method: 'turn/completed', params: { threadId: 'th1', turn: { id: 'tu1' } } });
+    threadStarted: 'th1',
+    idleThread: 'th1',
+    onThreadRead: () => ({
+      thread: { turns: [{ id: 'tu1', status: { type: 'completed' }, items: [{ type: 'agentMessage', text: 'first' }, { type: 'agentMessage', text: 'second' }] }] },
+    }),
+  },
+  live_after_idle: {
+    threadStarted: 'th1',
+    idleThread: 'th1',
+    onThreadRead: () => ({
+      thread: { turns: [{ id: 'tu1', status: { type: 'completed' }, items: [{ type: 'agentMessage', text: 'first idle reply' }] }] },
+    }),
+    afterFirstResume: (sock) => {
+      setTimeout(() => {
+        sock.serverSend({ jsonrpc: '2.0', method: 'turn/started', params: { threadId: 'th1', turn: { id: 'tu2' } } });
+        sock.serverSend({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'th1', turnId: 'tu2', item: { type: 'agentMessage', text: 'live second turn' } } });
+        sock.serverSend({ jsonrpc: '2.0', method: 'turn/completed', params: { threadId: 'th1', turn: { id: 'tu2' } } });
+      }, 20);
     },
   },
   tool_only: {
-    afterInitialize: (sock) => {
-      sock.serverSend({ jsonrpc: '2.0', method: 'turn/started', params: { threadId: 'th1', turn: { id: 'tu1' } } });
-      sock.serverSend({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'th1', turnId: 'tu1', item: { type: 'toolCall', text: 'x' } } });
-      sock.serverSend({ jsonrpc: '2.0', method: 'turn/completed', params: { threadId: 'th1', turn: { id: 'tu1' } } });
-    },
+    threadStarted: 'th1',
+    idleThread: 'th1',
+    onThreadRead: () => ({
+      thread: { turns: [{ id: 'tu1', status: { type: 'completed' }, items: [{ type: 'toolCall', text: 'x' }] }] },
+    }),
   },
   fallback_text: {
+    threadStarted: 'th1',
+    idleThread: 'th1',
     onThreadRead: () => ({
-      thread: { turns: [{ id: 'tu1', items: [{ type: 'agentMessage', text: 'fallback text' }] }] },
+      thread: { turns: [{ id: 'tu1', status: { type: 'completed' }, items: [{ type: 'agentMessage', text: 'fallback text' }] }] },
     }),
-    afterInitialize: (sock) => {
-      sock.serverSend({ jsonrpc: '2.0', method: 'turn/started', params: { threadId: 'th1', turn: { id: 'tu1' } } });
-      sock.serverSend({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'th1', turnId: 'tu1', item: { type: 'agentMessage', text: '   ' } } });
-      sock.serverSend({ jsonrpc: '2.0', method: 'turn/completed', params: { threadId: 'th1', turn: { id: 'tu1' } } });
-    },
-    afterThreadRead: () => {},
   },
   fallback_empty: {
+    threadStarted: 'th1',
+    idleThread: 'th1',
     onThreadRead: () => ({
-      thread: { turns: [{ id: 'tu1', items: [{ type: 'agentMessage', text: '  ' }] }] },
+      thread: { turns: [{ id: 'tu1', status: { type: 'completed' }, items: [{ type: 'agentMessage', text: '  ' }] }] },
     }),
-    afterInitialize: (sock) => {
-      sock.serverSend({ jsonrpc: '2.0', method: 'turn/started', params: { threadId: 'th1', turn: { id: 'tu1' } } });
-      sock.serverSend({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'th1', turnId: 'tu1', item: { type: 'agentMessage', text: '' } } });
-      sock.serverSend({ jsonrpc: '2.0', method: 'turn/completed', params: { threadId: 'th1', turn: { id: 'tu1' } } });
-    },
-    afterThreadRead: () => {},
   },
   disconnect: {
-    afterInitialize: (sock) => {
+    threadStarted: 'th1',
+    idleThread: 'th1',
+    closeAfterIdle: true,
+    afterFirstResume: (sock) => {
       sock.serverSend({ jsonrpc: '2.0', method: 'turn/started', params: { threadId: 'th1', turn: { id: 'tu1' } } });
       setTimeout(() => sock.close(), 10);
+    },
+  },
+  loaded_sweep: {
+    loadedThreads: ['th1'],
+    afterFirstResume: (sock) => {
+      sock.serverSend({ jsonrpc: '2.0', method: 'turn/started', params: { threadId: 'th1', turn: { id: 'tu1' } } });
+      sock.serverSend({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'th1', turnId: 'tu1', item: { type: 'agentMessage', text: 'swept hello' } } });
+      sock.serverSend({ jsonrpc: '2.0', method: 'turn/completed', params: { threadId: 'th1', turn: { id: 'tu1' } } });
     },
   },
 };
@@ -100,11 +121,52 @@ const script = scripts[caseName];
 if (!script) throw new Error(`unknown case: ${caseName}`);
 
 class FakeWsServer {
+  constructor() {
+    this.resumed = new Set();
+    this.idleSent = new Set();
+  }
+
   onClientMessage(sock, msg) {
+    if (msg.method) recordRpcCall(msg.method, msg.params || {});
+
     if (msg.method === 'initialize') {
       setImmediate(() => {
         sock.serverSend({ jsonrpc: '2.0', id: msg.id, result: {} });
-        script.afterInitialize?.(sock);
+      });
+      return;
+    }
+    if (msg.method === 'initialized') {
+      setImmediate(() => {
+        if (script.threadStarted) {
+          sock.serverSend({ jsonrpc: '2.0', method: 'thread/started', params: { thread: { id: script.threadStarted } } });
+        }
+        if (script.idleThread && !this.idleSent.has(script.idleThread)) {
+          this.idleSent.add(script.idleThread);
+          setTimeout(() => {
+            sock.serverSend({
+              jsonrpc: '2.0',
+              method: 'thread/status/changed',
+              params: { threadId: script.idleThread, status: { type: 'idle' } },
+            });
+            if (script.closeAfterIdle) setTimeout(() => sock.close(), 10);
+          }, 10);
+        }
+      });
+      return;
+    }
+    if (msg.method === 'thread/loaded/list') {
+      setImmediate(() => {
+        sock.serverSend({ jsonrpc: '2.0', id: msg.id, result: { data: script.loadedThreads || [] } });
+      });
+      return;
+    }
+    if (msg.method === 'thread/resume') {
+      setImmediate(() => {
+        sock.serverSend({ jsonrpc: '2.0', id: msg.id, result: { thread: { id: msg.params.threadId, turns: [] } } });
+        if (!this.resumed.has(msg.params.threadId)) {
+          this.resumed.add(msg.params.threadId);
+          script.afterFirstResume?.(sock, msg.params.threadId);
+        }
       });
       return;
     }

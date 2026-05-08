@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 
 const CASE_RUNNER = '/home/dl/Projects/zcrew/tests/helpers/codex-auto-reply-case.mjs';
+const ADAPTER = '/home/dl/Projects/zcrew/codex-auto-reply.sparky.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -14,9 +15,14 @@ function readCalls(file) {
   return fs.readFileSync(file, 'utf8').trim().split('\n').filter(Boolean);
 }
 
-async function runCase({ caseName, expectedCalls, expectedExit, settleMs = 200 }) {
+function readRpcCalls(file) {
+  return readCalls(file).map((line) => JSON.parse(line));
+}
+
+async function runCase({ caseName, expectedCalls, expectedExit, expectedRpcMethods = [], settleMs = 200 }) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-auto-reply-case-'));
   const callsFile = path.join(tmp, 'calls.txt');
+  const rpcCallsFile = path.join(tmp, 'rpc-calls.txt');
   const zcrewBin = path.join(tmp, 'zcrew');
   fs.writeFileSync(zcrewBin, `#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"${callsFile}\"\n`, { mode: 0o755 });
 
@@ -25,6 +31,8 @@ async function runCase({ caseName, expectedCalls, expectedExit, settleMs = 200 }
       ...process.env,
       CASE_NAME: caseName,
       CALLS_FILE: callsFile,
+      RPC_CALLS_FILE: rpcCallsFile,
+      ADAPTER_PATH: ADAPTER,
       ZCREW_BIN: zcrewBin,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -45,6 +53,7 @@ async function runCase({ caseName, expectedCalls, expectedExit, settleMs = 200 }
     while (exitCode === null && Date.now() < deadline) await sleep(20);
     assert.equal(exitCode, 3, `${caseName}: expected exit 3\nstdout=${stdout}\nstderr=${stderr}`);
     assert.deepEqual(readCalls(callsFile), expectedCalls, `${caseName}: calls mismatch\nstdout=${stdout}\nstderr=${stderr}`);
+    assert.deepEqual(readRpcCalls(rpcCallsFile).map((entry) => entry.method), expectedRpcMethods, `${caseName}: rpc mismatch\nstdout=${stdout}\nstderr=${stderr}`);
   } else {
     const deadline = Date.now() + 2000;
     while (Date.now() < deadline) {
@@ -60,16 +69,19 @@ async function runCase({ caseName, expectedCalls, expectedExit, settleMs = 200 }
 
     assert.equal(exitCode, 0, `${caseName}: expected exit 0 after SIGTERM\nstdout=${stdout}\nstderr=${stderr}`);
     assert.deepEqual(readCalls(callsFile), expectedCalls, `${caseName}: calls mismatch\nstdout=${stdout}\nstderr=${stderr}`);
+    assert.deepEqual(readRpcCalls(rpcCallsFile).map((entry) => entry.method), expectedRpcMethods, `${caseName}: rpc mismatch\nstdout=${stdout}\nstderr=${stderr}`);
   }
 
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 
-await runCase({ caseName: 'one', expectedCalls: ['reply hello'], expectedExit: 0 });
-await runCase({ caseName: 'multi', expectedCalls: ['reply first'], expectedExit: 0 });
-await runCase({ caseName: 'tool_only', expectedCalls: [], expectedExit: 0 });
-await runCase({ caseName: 'fallback_text', expectedCalls: ['reply fallback text'], expectedExit: 0, settleMs: 300 });
-await runCase({ caseName: 'fallback_empty', expectedCalls: [], expectedExit: 0, settleMs: 300 });
-await runCase({ caseName: 'disconnect', expectedCalls: [], expectedExit: 3 });
+await runCase({ caseName: 'one', expectedCalls: ['reply hello'], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
+await runCase({ caseName: 'multi', expectedCalls: ['reply second'], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
+await runCase({ caseName: 'live_after_idle', expectedCalls: ['reply first idle reply', 'reply live second turn'], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
+await runCase({ caseName: 'tool_only', expectedCalls: [], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
+await runCase({ caseName: 'fallback_text', expectedCalls: ['reply fallback text'], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
+await runCase({ caseName: 'fallback_empty', expectedCalls: [], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
+await runCase({ caseName: 'disconnect', expectedCalls: [], expectedExit: 3, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
+await runCase({ caseName: 'loaded_sweep', expectedCalls: ['reply swept hello'], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume'] });
 
 console.log('ok');

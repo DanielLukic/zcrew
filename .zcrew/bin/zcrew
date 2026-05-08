@@ -335,10 +335,10 @@ ensure_team_conf_template() {
   cat > "$team_file" <<'EOF'
 # Team composition — read by the orchestrator at session start.
 # name  agent  model  role
-claudio  claude  sonnet  assistant / researcher
-sam      codex   -       reviewer
-sparky   codex   -       implementer
-piper    pi      -       optional alternative model agent
+claudio  claude  sonnet         assistant / researcher
+sam      codex   -              reviewer
+sparky   codex   gpt-5.3-codex  implementer
+piper    pi      glm-5.1        optional alternative model agent
 EOF
 }
 
@@ -702,6 +702,23 @@ cmd_spawn() {
     esac
   done
   [[ -n "$agent" && -n "$name" ]] || { echo "Usage: zcrew spawn [--model <model>] <agent> <name>" >&2; exit 1; }
+
+  # CLI --model wins. Otherwise resolve from .zcrew/team.conf row:
+  #   name agent model role  (whitespace-delimited; "-" or empty = no override)
+  if [[ -z "$model" ]]; then
+    local team_file="$PROJECT_DIR/.zcrew/team.conf"
+    if [[ -f "$team_file" ]]; then
+      local team_model
+      team_model="$(awk -v n="$name" '
+        /^[[:space:]]*#/ { next }
+        NF < 3 { next }
+        $1 == n { print $3; exit }
+      ' "$team_file")"
+      if [[ -n "$team_model" && "$team_model" != "-" ]]; then
+        model="$team_model"
+      fi
+    fi
+  fi
 
   # STEP 1: Minimal spawn — just open a new pane. No bx, no wrapper, no
   # sentinel, no registry. Baby steps. Layers added back in subsequent steps.
