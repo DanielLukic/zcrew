@@ -931,6 +931,63 @@ test_11j_spawn_outside_zellij_skips_claim_without_error() {
   jq -e '(.panes | has("main") | not) and .panes.plain.paneId == "561"' "$d/.zcrew/registry.json" >/dev/null
 }
 
+# ── cmd_spawn model fallback from .zcrew/team.conf ──────────────────────
+
+_run_spawn_with_team_conf() {
+  # args: <test_dir> <team_conf_content> <name> [--model X]
+  local d="$1" team_content="$2" worker_name="$3"
+  shift 3
+  local mockbin="$d/mock-bin" args_file="$d/zellij-args.txt"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  mkdir -p "$d/.bx" "$d/.zcrew/lib/launchers"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$d/.zcrew/lib/launchers/codex.sh"
+  chmod +x "$d/.zcrew/lib/launchers/codex.sh"
+  printf '%s' "$team_content" > "$d/.zcrew/team.conf"
+  make_mock_zellij_spawn "$mockbin" "$args_file"
+
+  (
+    cd "$d" || exit 1
+    env -u BX_INSIDE -u ZELLIJ_PANE_ID \
+      PATH="$mockbin:$PATH" MOCK_ZELLIJ_ARGS_FILE="$args_file" \
+      MOCK_ZELLIJ_LIST_OUTPUT='' MOCK_ZELLIJ_NEW_PANE_OUTPUT='terminal_561' \
+      ZELLIJ_SESSION_NAME='test-session' "$ZCREW_BIN" spawn "$@" codex "$worker_name" >/dev/null 2>&1
+  )
+}
+
+test_11k_spawn_uses_team_conf_model_when_cli_omits() {
+  local d
+  d="$(new_test_dir 11k)"
+  _run_spawn_with_team_conf "$d" "sparky codex gpt-5.3-codex implementer
+" "sparky" || return 1
+  grep -Fq 'ZCREW_MODEL=gpt-5.3-codex' "$d/zellij-args.txt"
+}
+
+test_11l_spawn_team_conf_dash_keeps_model_unset() {
+  local d
+  d="$(new_test_dir 11l)"
+  _run_spawn_with_team_conf "$d" "sam codex - reviewer
+" "sam" || return 1
+  ! grep -Fq 'ZCREW_MODEL=' "$d/zellij-args.txt"
+}
+
+test_11m_spawn_cli_model_wins_over_team_conf() {
+  local d
+  d="$(new_test_dir 11m)"
+  _run_spawn_with_team_conf "$d" "sparky codex gpt-5.3-codex implementer
+" "sparky" --model gpt-5.5 || return 1
+  grep -Fq 'ZCREW_MODEL=gpt-5.5' "$d/zellij-args.txt" || return 1
+  ! grep -Fq 'ZCREW_MODEL=gpt-5.3-codex' "$d/zellij-args.txt"
+}
+
+test_11n_spawn_name_missing_from_team_conf_keeps_model_unset() {
+  local d
+  d="$(new_test_dir 11n)"
+  _run_spawn_with_team_conf "$d" "sam codex - reviewer
+" "stranger" || return 1
+  ! grep -Fq 'ZCREW_MODEL=' "$d/zellij-args.txt"
+}
+
 test_12_send_outside_project_fails_hard() {
   local d out
   d="$(new_test_dir 12)"
@@ -1649,10 +1706,10 @@ test_34h_install_seeds_team_conf_template() {
   [[ -f "$d/.zcrew/team.conf" ]] || return 1
   grep -Fxq '# Team composition — read by the orchestrator at session start.' "$d/.zcrew/team.conf" || return 1
   grep -Fxq '# name  agent  model  role' "$d/.zcrew/team.conf" || return 1
-  grep -Fxq 'claudio  claude  sonnet  assistant / researcher' "$d/.zcrew/team.conf" || return 1
-  grep -Fxq 'sam      codex   -       reviewer' "$d/.zcrew/team.conf" || return 1
-  grep -Fxq 'sparky   codex   -       implementer' "$d/.zcrew/team.conf" || return 1
-  grep -Fxq 'piper    pi      -       optional alternative model agent' "$d/.zcrew/team.conf"
+  grep -Fxq 'claudio  claude  sonnet         assistant / researcher' "$d/.zcrew/team.conf" || return 1
+  grep -Fxq 'sam      codex   -              reviewer' "$d/.zcrew/team.conf" || return 1
+  grep -Fxq 'sparky   codex   gpt-5.3-codex  implementer' "$d/.zcrew/team.conf" || return 1
+  grep -Fxq 'piper    pi      glm-5.1        optional alternative model agent' "$d/.zcrew/team.conf"
 }
 
 test_34i_reinstall_preserves_existing_team_conf() {
@@ -1940,12 +1997,11 @@ test_42_codex_launcher_runs_inside_bx() {
 }
 
 test_43_codex_launcher_forwards_model_through_bx() {
-  # The launcher's model-forwarding lives in the inner section (running
-  # inside bx). Verify the source contains the conditional --model
-  # interpolation tied to ZCREW_MODEL. Simpler than mocking bx + codex
-  # to reach the line at runtime.
+  # The launcher always passes --model: ZCREW_MODEL if set, else the
+  # enforced default gpt-5.4. Source-level check (simpler than a runtime
+  # mock). Use -- to keep grep from reading --model as a flag.
   local launcher="$REPO_ROOT/.zcrew/lib/launchers/codex.sh"
-  grep -Fq '${ZCREW_MODEL:+--model "$ZCREW_MODEL"}' "$launcher"
+  grep -Fq -- '--model "${ZCREW_MODEL:-gpt-5.4}"' "$launcher"
 }
 
 test_44_codex_launcher_does_not_mutate_sandbox_config_before_bx_run() {
@@ -1977,6 +2033,14 @@ test_44b_claude_launcher_drops_mcp_config() {
   local launcher="$REPO_ROOT/.zcrew/lib/launchers/claude.sh"
   grep -Fq -- '--strict-mcp-config' "$launcher" || return 1
   ! grep -Fq -- '--mcp-config' "$launcher"
+}
+
+test_44c_launchers_export_ai_kind() {
+  local d="$REPO_ROOT/.zcrew/lib/launchers"
+  grep -Fxq 'export AI_KIND=claude' "$d/claude.sh" || return 1
+  grep -Fxq 'export AI_KIND=pi' "$d/pi.sh" || return 1
+  # Codex sets AI_KIND in BOTH outer and inner sections (outer execs into bx).
+  [[ "$(grep -Fxc 'export AI_KIND=codex' "$d/codex.sh")" -ge 2 ]]
 }
 
 test_45_install_self_install_no_crash() {
@@ -3056,6 +3120,10 @@ main() {
   run_test "11h) spawn claims host as main when absent" test_11h_spawn_claims_host_as_main_when_absent
   run_test "11i) spawn does not churn when live main exists" test_11i_spawn_does_not_churn_when_live_main_exists
   run_test "11j) spawn outside zellij skips claim without error" test_11j_spawn_outside_zellij_skips_claim_without_error
+  run_test "11k) spawn picks team.conf model when CLI omits --model" test_11k_spawn_uses_team_conf_model_when_cli_omits
+  run_test "11l) spawn keeps model unset when team.conf row is dash placeholder" test_11l_spawn_team_conf_dash_keeps_model_unset
+  run_test "11m) spawn CLI --model wins over team.conf" test_11m_spawn_cli_model_wins_over_team_conf
+  run_test "11n) spawn keeps model unset when name missing from team.conf" test_11n_spawn_name_missing_from_team_conf_keeps_model_unset
   run_test "12) send outside project fails hard" test_12_send_outside_project_fails_hard
   run_test "12b) stale send suggestion preserves unknown agent name" test_12b_send_stale_unknown_agent_preserves_agent_name_in_suggestion
   run_test "13) rename foo->bar preserves fields and removes old key" test_13_rename_happy_path_preserves_fields
@@ -3114,6 +3182,7 @@ main() {
   run_test "43) codex launcher forwards model through bx" test_43_codex_launcher_forwards_model_through_bx
   run_test "44) codex launcher does not mutate sandbox config before bx run" test_44_codex_launcher_does_not_mutate_sandbox_config_before_bx_run
   run_test "44b) claude launcher does not pass --mcp-config (zero MCP for worker)" test_44b_claude_launcher_drops_mcp_config
+  run_test "44c) all launchers export AI_KIND" test_44c_launchers_export_ai_kind
   run_test "45) install where src == target skips materialization without crashing" test_45_install_self_install_no_crash
   run_test "46) resolve_sender_name_readonly is pure and returns empty for unmapped panes" test_46_resolve_sender_name_readonly_is_pure
   run_test "47) claim_main_for_send promotes host pane to main when main is absent" test_47_claim_main_for_send_promotes_host_when_main_absent

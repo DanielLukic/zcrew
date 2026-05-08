@@ -12,6 +12,7 @@
 #  (3) sandbox-local ~/.pi/agent state — auth.json is copied by bx; mcp.json is
 #      stubbed empty to block host MCP bleed.
 set -euo pipefail
+export AI_KIND=pi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

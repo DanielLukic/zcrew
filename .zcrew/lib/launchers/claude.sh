@@ -8,6 +8,7 @@
 # skipDangerousModePermissionPrompt so the first spawn doesn't hit the one-time
 # "are you sure?" dialog. The key is top-level (not under "permissions").
 set -euo pipefail
+export AI_KIND=claude
 project_dir="$PWD"
 [[ -d "$project_dir/bin" ]] && export PATH="$project_dir/bin:$PATH"
 cd "$project_dir"

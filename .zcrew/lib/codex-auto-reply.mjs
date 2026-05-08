@@ -9,6 +9,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ZCREW_BIN = process.env.ZCREW_BIN || path.resolve(__dirname, '../bin/zcrew');
 const WS_URL = process.env.ZCREW_CODEX_WS_URL || '';
 
+function log(message) {
+  console.error(`[codex-auto-reply] ${message}`);
+}
+
 class RpcClient {
   constructor(url) {
     this.url = url;
@@ -32,7 +36,7 @@ class RpcClient {
         try {
           msg = JSON.parse(String(ev.data));
         } catch {
-          console.error('[codex-auto-reply] ignoring invalid JSON message');
+          log('ignoring invalid JSON message');
           return;
         }
         if (Object.prototype.hasOwnProperty.call(msg, 'id')) {
@@ -79,12 +83,12 @@ async function runZcrewReply(text) {
   try {
     const { stdout, stderr } = await execFileAsync(ZCREW_BIN, ['reply', msg]);
     const out = [stdout?.trim(), stderr?.trim()].filter(Boolean).join('\n');
-    console.error(`[codex-auto-reply] zcrew reply sent${out ? `: ${out}` : ''}`);
+    log(`zcrew reply sent${out ? `: ${out}` : ''}`);
     return true;
   } catch (err) {
     const e = err;
     const out = [e.stdout?.trim(), e.stderr?.trim(), e.message].filter(Boolean).join('\n');
-    console.error(`[codex-auto-reply] zcrew reply failed: ${out}`);
+    log(`zcrew reply failed: ${out}`);
     return false;
   }
 }
@@ -104,6 +108,25 @@ function lastNonEmptyAgentMessageForTurn(threadReadResult, turnId) {
   return '';
 }
 
+function loadedThreadIds(result) {
+  if (Array.isArray(result?.data)) return result.data;
+  if (Array.isArray(result?.threadIds)) return result.threadIds;
+  if (Array.isArray(result?.threads)) {
+    return result.threads.map((thread) => thread?.id).filter(Boolean);
+  }
+  return [];
+}
+
+function lastCompletedTurn(threadReadResult) {
+  const turns = threadReadResult?.thread?.turns || [];
+  for (let i = turns.length - 1; i >= 0; i -= 1) {
+    const turn = turns[i];
+    if (!turn?.id) continue;
+    if (turn.status?.type === 'completed' || turn.completedAt) return turn;
+  }
+  return turns.at(-1) || null;
+}
+
 async function main() {
   if (!WS_URL) throw new Error('missing ZCREW_CODEX_WS_URL');
   if (typeof WebSocket === 'undefined') throw new Error('WebSocket is unavailable in this Node runtime');
@@ -112,15 +135,71 @@ async function main() {
   const sentTurns = new Set();
   const pendingTurns = new Set();
   const openTurns = new Set();
+  const subscribedThreads = new Set();
+  const resumingThreads = new Map();
   let shuttingDown = false;
 
   const keyFor = (threadId, turnId) => `${threadId}:${turnId}`;
+
+  const resumeThread = async (threadId) => {
+    if (!threadId || subscribedThreads.has(threadId)) return;
+    const inFlight = resumingThreads.get(threadId);
+    if (inFlight) return inFlight;
+
+    const promise = rpc
+      .request('thread/resume', { threadId, excludeTurns: true })
+      .then(() => {
+        subscribedThreads.add(threadId);
+        return true;
+      })
+      .catch((err) => {
+        log(`thread/resume failed for ${threadId}: ${err}`);
+        return false;
+      })
+      .finally(() => {
+        resumingThreads.delete(threadId);
+      });
+
+    resumingThreads.set(threadId, promise);
+    return promise;
+  };
 
   rpc.onNotify = async (method, params) => {
     try {
       if (method === 'turn/started') {
         const key = keyFor(params.threadId, params.turn.id);
         openTurns.add(key);
+        return;
+      }
+
+      if (method === 'thread/status/changed') {
+        if (params.status?.type !== 'idle') return;
+        const threadId = params.threadId || params.thread?.id;
+        if (!threadId || subscribedThreads.has(threadId)) return;
+
+        const resumed = await resumeThread(threadId);
+        if (!resumed) return;
+
+        const read = await rpc.request('thread/read', {
+          threadId,
+          includeTurns: true,
+        });
+        const turn = lastCompletedTurn(read);
+        if (!turn?.id) return;
+
+        const key = keyFor(threadId, turn.id);
+        if (sentTurns.has(key) || pendingTurns.has(key)) return;
+
+        const fallback = lastNonEmptyAgentMessageForTurn(read, turn.id);
+        if (!fallback.trim()) {
+          log(`no non-empty agentMessage for ${key}`);
+          return;
+        }
+
+        pendingTurns.add(key);
+        const ok = await runZcrewReply(fallback);
+        pendingTurns.delete(key);
+        if (ok) sentTurns.add(key);
         return;
       }
 
@@ -144,7 +223,7 @@ async function main() {
       if (method === 'turn/completed') {
         const key = keyFor(params.threadId, params.turn.id);
         openTurns.delete(key);
-        if (sentTurns.has(key)) return;
+        if (sentTurns.has(key) || pendingTurns.has(key)) return;
 
         const read = await rpc.request('thread/read', {
           threadId: params.threadId,
@@ -158,18 +237,18 @@ async function main() {
           pendingTurns.delete(key);
           if (ok) sentTurns.add(key);
         } else {
-          console.error(`[codex-auto-reply] no non-empty agentMessage for ${key}`);
+          log(`no non-empty agentMessage for ${key}`);
         }
       }
     } catch (err) {
-      console.error(`[codex-auto-reply] notification handling error: ${err?.message || err}`);
+      log(`notification handling error: ${err?.message || err}`);
     }
   };
 
   rpc.onClose = () => {
     if (shuttingDown) return;
     if (openTurns.size > 0) {
-      console.error('[codex-auto-reply] websocket disconnected with active turns');
+      log('websocket disconnected with active turns');
       process.exitCode = 3;
     }
     process.exit();
@@ -192,14 +271,24 @@ async function main() {
     capabilities: null,
   });
   rpc.notify('initialized', {});
-  console.error(`[codex-auto-reply] connected to ${WS_URL}`);
+
+  try {
+    const loaded = await rpc.request('thread/loaded/list', {});
+    for (const threadId of loadedThreadIds(loaded)) {
+      await resumeThread(threadId);
+    }
+  } catch (err) {
+    log(`thread/loaded/list sweep failed: ${err}`);
+  }
+
+  log(`connected to ${WS_URL}`);
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   main().catch((err) => {
-    console.error(`[codex-auto-reply] fatal: ${err?.stack || err}`);
+    log(`fatal: ${err?.stack || err}`);
     process.exit(2);
   });
 }
 
-export { lastNonEmptyAgentMessageForTurn, RpcClient, runZcrewReply, main };
+export { lastNonEmptyAgentMessageForTurn, loadedThreadIds, RpcClient, runZcrewReply, main };

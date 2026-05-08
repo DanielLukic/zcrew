@@ -3,6 +3,7 @@
 # zcrew-managed
 # codex launcher with app-server sidecar + auto-reply adapter while keeping TUI visible.
 set -euo pipefail
+export AI_KIND=codex
 
 project_dir="$PWD"
 [[ -d "$project_dir/bin" ]] && export PATH="$project_dir/bin:$PATH"
@@ -19,6 +20,9 @@ if [[ "${1:-}" != "--zcrew-inner-codex-launcher" ]]; then
   printf '%s\n' "$$" > "$state_dir/outer.pid"
   exec bx run -- bash "$0" --zcrew-inner-codex-launcher
 fi
+
+# Re-assert inside the inner launcher path as an explicit invariant.
+export AI_KIND=codex
 
 session_name="${ZELLIJ_SESSION_NAME:-default}"
 mkdir -p "$state_dir"
@@ -121,7 +125,7 @@ ZCREW_CODEX_WS_URL="$ws_url" \
 adapter_pid=$!
 printf '%s\n' "$adapter_pid" > "$adapter_pid_file"
 
-codex --remote "$ws_url" --no-alt-screen -a never -s danger-full-access ${ZCREW_MODEL:+--model "$ZCREW_MODEL"}
+codex --remote "$ws_url" --no-alt-screen -a never -s danger-full-access --model "${ZCREW_MODEL:-gpt-5.4}"
 tui_rc=$?
 
 exit "$tui_rc"
