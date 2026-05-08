@@ -204,19 +204,9 @@ async function main() {
       }
 
       if (method === 'item/completed') {
-        const item = params.item;
-        if (item?.type !== 'agentMessage') return;
-        const key = keyFor(params.threadId, params.turnId);
-        const text = typeof item.text === 'string' ? item.text : '';
-        if (text.trim()) {
-          if (sentTurns.has(key) || pendingTurns.has(key)) return;
-          pendingTurns.add(key);
-          const ok = await runZcrewReply(text);
-          pendingTurns.delete(key);
-          if (ok) sentTurns.add(key);
-          return;
-        }
-
+        // Track open turns for disconnect detection, but do NOT send reply here.
+        // turn/completed handles the actual reply using lastNonEmptyAgentMessageForTurn,
+        // which correctly picks the last (final) agentMessage instead of the first.
         return;
       }
 
