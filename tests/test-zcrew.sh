@@ -3088,6 +3088,64 @@ test_87_reconcile_empty_live_skips_orphan_walk() {
   [[ -d "$state_dir" ]]
 }
 
+test_88_cleanup_preserves_state_when_identity_check_fails() {
+  local d mockbin state_dir fake_pid
+  d="$(new_test_dir 88)"
+  mockbin="$d/mock-bin"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register coder --paneId 200 --sessionId s200 --agent codex --cwd "$d" --pid 4 --status alive >/dev/null 2>&1 || return 1
+  make_mock_zellij "$mockbin"
+
+  state_dir="$d/.zcrew/state/codex-worker/200"
+  mkdir -p "$state_dir"
+
+  # Spawn a process whose /proc/N/cmdline does NOT contain codex.sh
+  # Using "sleep" directly (no exec -a override) so identity check fails
+  sleep 300 &
+  fake_pid=$!
+  printf '%s\n' "$fake_pid" > "$state_dir/outer.pid"
+
+  # Exercise: close should NOT remove state dir because identity check fails
+  (cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_ZELLIJ_CLOSE_LOG_FILE="$d/close.log" "$ZCREW_BIN" close coder >/dev/null 2>&1) || true
+
+  # Assert: process still alive, state dir and pid file still exist
+  local ok=true
+  if ! kill -0 "$fake_pid" 2>/dev/null; then ok=false; fi
+  if [[ ! -d "$state_dir" ]]; then ok=false; fi
+  if [[ ! -f "$state_dir/outer.pid" ]]; then ok=false; fi
+  kill "$fake_pid" 2>/dev/null || true
+  $ok
+}
+
+test_89_orphan_walk_preserves_state_when_identity_check_fails() {
+  local d mockbin orphan_dir fake_pid
+  d="$(new_test_dir 89)"
+  mockbin="$d/mock-bin"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  make_mock_zellij "$mockbin"
+
+  orphan_dir="$d/.zcrew/state/codex-worker/333"
+  mkdir -p "$orphan_dir"
+
+  # Spawn a non-codex process so identity check fails
+  sleep 300 &
+  fake_pid=$!
+  printf '%s\n' "$fake_pid" > "$orphan_dir/outer.pid"
+  touch -d '2 minutes ago' "$orphan_dir"
+
+  # Exercise: reconcile should NOT remove the state dir
+  (cd "$d" && env -u BX_INSIDE ZCREW_AUTO_SYNC=1 PATH="$mockbin:$PATH" MOCK_ZELLIJ_LIST_OUTPUT='terminal_999' ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=0 "$ZCREW_BIN" list --json >/dev/null 2>&1) || true
+
+  local ok=true
+  if ! kill -0 "$fake_pid" 2>/dev/null; then ok=false; fi
+  if [[ ! -d "$orphan_dir" ]]; then ok=false; fi
+  if [[ ! -f "$orphan_dir/outer.pid" ]]; then ok=false; fi
+  kill "$fake_pid" 2>/dev/null || true
+  $ok
+}
+
 main() {
   mkdir -p "$TEST_ROOT"
 
@@ -3244,6 +3302,8 @@ main() {
   run_test "85) reconcile orphan walk cleans not-live, preserves live" test_85_reconcile_orphan_walk_cleans_not_live_preserves_live
   run_test "86) gc --force ignores live filter, preserves fresh dirs" test_86_gc_force_ignores_live_filter_but_respects_freshness
   run_test "87) reconcile with empty live list skips orphan walk" test_87_reconcile_empty_live_skips_orphan_walk
+  run_test "88) cleanup preserves state when identity check fails (close path)" test_88_cleanup_preserves_state_when_identity_check_fails
+  run_test "89) orphan walk preserves state when identity check fails" test_89_orphan_walk_preserves_state_when_identity_check_fails
 
   echo ""
   echo "Total: $PASS_COUNT PASS, $FAIL_COUNT FAIL"

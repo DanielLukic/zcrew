@@ -852,7 +852,7 @@ kill_outer_pid_if_safe() {
   fi
   if ! is_expected_outer_pid "$pid"; then
     logger "gc" "warn" "skip kill for unexpected outer pid paneId=$pane_id pid=$pid"
-    return 0
+    return 1
   fi
   kill "$pid" 2>/dev/null || true
   local deadline=$((SECONDS + 3))
@@ -898,9 +898,12 @@ walk_codex_worker_orphans() {
         continue
       fi
     fi
-    kill_outer_pid_if_safe "$pane_id"
-    rm -rf "$pane_path"
-    logger "gc" "info" "cleaned orphan codex worker state paneId=$pane_id mode=$mode"
+    if kill_outer_pid_if_safe "$pane_id"; then
+      rm -rf "$pane_path"
+      logger "gc" "info" "cleaned orphan codex worker state paneId=$pane_id mode=$mode"
+    else
+      logger "gc" "warn" "keeping orphan codex worker state (identity check refused kill) paneId=$pane_id"
+    fi
   done
   shopt -u nullglob
 }
@@ -1483,8 +1486,9 @@ cmd_close() {
   # only exists for codex workers).
   local codex_state_dir="$PROJECT_DIR/.zcrew/state/codex-worker/$pane_id"
   if [[ -d "$codex_state_dir" ]]; then
-    kill_outer_pid_if_safe "$pane_id"
-    rm -rf "$codex_state_dir"
+    if kill_outer_pid_if_safe "$pane_id"; then
+      rm -rf "$codex_state_dir"
+    fi
   fi
 
   "$0" unregister "$name"
