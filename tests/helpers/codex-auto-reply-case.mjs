@@ -155,6 +155,22 @@ const scripts = {
       sock.serverSend({ jsonrpc: '2.0', method: 'turn/completed', params: { threadId: 'th1', turn: { id: 'tu1' } } });
     },
   },
+  replied_persist_dedupe: {
+    idleThread: 'th1',
+    onThreadRead: () => ({
+      thread: { turns: [{ id: 'tu1', status: { type: 'completed' }, items: [{ type: 'agentMessage', text: 'already replied' }] }] },
+    }),
+  },
+  replied_persist_write: {
+    loadedThreads: ['th1'],
+    onThreadRead: () => ({
+      thread: { turns: [{ id: 'tu1', status: { type: 'completed' }, items: [{ type: 'agentMessage', text: 'fresh reply' }] }] },
+    }),
+    afterFirstResume: (sock) => {
+      sock.serverSend({ jsonrpc: '2.0', method: 'turn/started', params: { threadId: 'th1', turn: { id: 'tu1' } } });
+      sock.serverSend({ jsonrpc: '2.0', method: 'turn/completed', params: { threadId: 'th1', turn: { id: 'tu1' } } });
+    },
+  },
 };
 
 const script = scripts[caseName];

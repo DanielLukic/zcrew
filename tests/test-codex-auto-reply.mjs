@@ -5,8 +5,9 @@ import path from 'node:path';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 
-const CASE_RUNNER = '/home/dl/Projects/zcrew/tests/helpers/codex-auto-reply-case.mjs';
-const ADAPTER = process.env.ADAPTER_PATH || '/home/dl/Projects/zcrew/.zcrew/lib/codex-auto-reply.mjs';
+const WT = path.resolve(import.meta.dirname, '..');
+const CASE_RUNNER = path.join(WT, 'tests/helpers/codex-auto-reply-case.mjs');
+const ADAPTER = process.env.ADAPTER_PATH || path.join(WT, '.zcrew/lib/codex-auto-reply.mjs');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -19,12 +20,18 @@ function readRpcCalls(file) {
   return readCalls(file).map((line) => JSON.parse(line));
 }
 
-async function runCase({ caseName, expectedCalls, expectedExit, expectedRpcMethods = [], settleMs = 200 }) {
+async function runCase({ caseName, expectedCalls, expectedExit, expectedRpcMethods = [], settleMs = 200, seedRepliedKeys = [] }) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-auto-reply-case-'));
   const callsFile = path.join(tmp, 'calls.txt');
   const rpcCallsFile = path.join(tmp, 'rpc-calls.txt');
   const zcrewBin = path.join(tmp, 'zcrew');
   fs.writeFileSync(zcrewBin, `#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"${callsFile}\"\n`, { mode: 0o755 });
+
+  const stateDir = path.join(tmp, 'state');
+  fs.mkdirSync(stateDir, { recursive: true });
+  if (seedRepliedKeys.length > 0) {
+    fs.writeFileSync(path.join(stateDir, 'replied.json'), JSON.stringify(seedRepliedKeys));
+  }
 
   const child = spawn(process.execPath, [CASE_RUNNER], {
     env: {
@@ -34,6 +41,7 @@ async function runCase({ caseName, expectedCalls, expectedExit, expectedRpcMetho
       RPC_CALLS_FILE: rpcCallsFile,
       ADAPTER_PATH: ADAPTER,
       ZCREW_BIN: zcrewBin,
+      ZCREW_CODEX_STATE_DIR: stateDir,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -72,17 +80,49 @@ async function runCase({ caseName, expectedCalls, expectedExit, expectedRpcMetho
     assert.deepEqual(readRpcCalls(rpcCallsFile).map((entry) => entry.method), expectedRpcMethods, `${caseName}: rpc mismatch\nstdout=${stdout}\nstderr=${stderr}`);
   }
 
+  return { tmp, stateDir };
+}
+
+async function runCaseClean(opts) {
+  const { tmp } = await runCase(opts);
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 
-await runCase({ caseName: 'one', expectedCalls: ['reply hello'], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
-await runCase({ caseName: 'multi', expectedCalls: ['reply second'], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
-await runCase({ caseName: 'live_after_idle', expectedCalls: ['reply first idle reply', 'reply live second turn'], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read', 'thread/read'] });
-await runCase({ caseName: 'tool_only', expectedCalls: [], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
-await runCase({ caseName: 'fallback_text', expectedCalls: ['reply fallback text'], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
-await runCase({ caseName: 'fallback_empty', expectedCalls: [], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
-await runCase({ caseName: 'disconnect', expectedCalls: [], expectedExit: 3, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
-await runCase({ caseName: 'loaded_sweep', expectedCalls: ['reply swept hello'], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
-await runCase({ caseName: 'multi_item_turn_completed', expectedCalls: ['reply detailed final answer'], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
+await runCaseClean({ caseName: 'one', expectedCalls: ['reply hello'], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
+await runCaseClean({ caseName: 'multi', expectedCalls: ['reply second'], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
+await runCaseClean({ caseName: 'live_after_idle', expectedCalls: ['reply first idle reply', 'reply live second turn'], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read', 'thread/read'] });
+await runCaseClean({ caseName: 'tool_only', expectedCalls: [], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
+await runCaseClean({ caseName: 'fallback_text', expectedCalls: ['reply fallback text'], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
+await runCaseClean({ caseName: 'fallback_empty', expectedCalls: [], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
+await runCaseClean({ caseName: 'disconnect', expectedCalls: [], expectedExit: 3, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
+await runCaseClean({ caseName: 'loaded_sweep', expectedCalls: ['reply swept hello'], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
+await runCaseClean({ caseName: 'multi_item_turn_completed', expectedCalls: ['reply detailed final answer'], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
+
+// #15: seeded replied.json suppresses resend on restart
+{
+  const { tmp } = await runCase({
+    caseName: 'replied_persist_dedupe',
+    expectedCalls: [],
+    expectedExit: 0,
+    seedRepliedKeys: ['th1:tu1'],
+    expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'],
+  });
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
+
+// #15: replied.json grows after successful send
+{
+  const { tmp, stateDir } = await runCase({
+    caseName: 'replied_persist_write',
+    expectedCalls: ['reply fresh reply'],
+    expectedExit: 0,
+    expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'],
+  });
+  const repliedFile = path.join(stateDir, 'replied.json');
+  assert.ok(fs.existsSync(repliedFile), 'replied.json should exist after send');
+  const keys = JSON.parse(fs.readFileSync(repliedFile, 'utf8'));
+  assert.ok(keys.includes('th1:tu1'), `replied.json should contain th1:tu1, got ${JSON.stringify(keys)}`);
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
 
 console.log('ok');

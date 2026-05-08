@@ -3,11 +3,14 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import fs from 'node:fs';
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ZCREW_BIN = process.env.ZCREW_BIN || path.resolve(__dirname, '../bin/zcrew');
 const WS_URL = process.env.ZCREW_CODEX_WS_URL || '';
+const STATE_DIR = process.env.ZCREW_CODEX_STATE_DIR || '';
+const REPLIED_FILE = STATE_DIR ? path.join(STATE_DIR, 'replied.json') : '';
 
 function log(message) {
   console.error(`[codex-auto-reply] ${message}`);
@@ -127,12 +130,38 @@ function lastCompletedTurn(threadReadResult) {
   return turns.at(-1) || null;
 }
 
+function loadRepliedKeys() {
+  if (!REPLIED_FILE) return new Set();
+  try {
+    const data = fs.readFileSync(REPLIED_FILE, 'utf8').trim();
+    if (!data) return new Set();
+    const arr = JSON.parse(data);
+    if (!Array.isArray(arr)) return new Set();
+    return new Set(arr.filter((k) => typeof k === 'string'));
+  } catch (e) {
+    if (e.code !== 'ENOENT') log(`warn: failed to read replied.json: ${e.message}`);
+    return new Set();
+  }
+}
+
+function saveRepliedKeys(sentTurns) {
+  if (!REPLIED_FILE) return;
+  try {
+    const tmp = REPLIED_FILE + '.tmp.' + process.pid + '.' + Date.now();
+    const data = JSON.stringify([...sentTurns], null, 2);
+    fs.writeFileSync(tmp, data);
+    fs.renameSync(tmp, REPLIED_FILE);
+  } catch (e) {
+    log(`warn: failed to save replied.json: ${e.message}`);
+  }
+}
+
 async function main() {
   if (!WS_URL) throw new Error('missing ZCREW_CODEX_WS_URL');
   if (typeof WebSocket === 'undefined') throw new Error('WebSocket is unavailable in this Node runtime');
 
   const rpc = new RpcClient(WS_URL);
-  const sentTurns = new Set();
+  const sentTurns = loadRepliedKeys();
   const pendingTurns = new Set();
   const openTurns = new Set();
   const subscribedThreads = new Set();
@@ -199,7 +228,7 @@ async function main() {
         pendingTurns.add(key);
         const ok = await runZcrewReply(fallback);
         pendingTurns.delete(key);
-        if (ok) sentTurns.add(key);
+        if (ok) { sentTurns.add(key); saveRepliedKeys(sentTurns); }
         return;
       }
 
@@ -225,8 +254,7 @@ async function main() {
           pendingTurns.add(key);
           const ok = await runZcrewReply(fallback);
           pendingTurns.delete(key);
-          if (ok) sentTurns.add(key);
-        } else {
+          if (ok) { sentTurns.add(key); saveRepliedKeys(sentTurns); }
           log(`no non-empty agentMessage for ${key}`);
         }
       }
