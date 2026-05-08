@@ -64,6 +64,35 @@ test_2_tools_list_orchestrator() {
     [[ "$out" == "zcrew_list,zcrew_send" ]]
 }
 
+test_2b_tools_list_host_does_not_reimport_unset_bx_inside() {
+    new_fake_zcrew
+    local out
+    out="$(
+        BX_INSIDE=1 env FAKE_ZCREW="$FAKE_ZCREW" MCP_SERVER="$MCP_SERVER" python3 - <<'PY'
+import json
+import os
+import subprocess
+
+req = "\n".join(
+    [
+        '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}',
+        '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}',
+    ]
+) + "\n"
+proc = subprocess.run(
+    ["env", "-u", "BX_INSIDE", "python3", os.environ["MCP_SERVER"]],
+    input=req,
+    capture_output=True,
+    text=True,
+    env={**os.environ, "ZCREW_BIN": os.environ["FAKE_ZCREW"]},
+    check=False,
+)
+print(proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else "")
+PY
+    )"
+    [[ "$(jq -r '.result.tools | map(.name) | sort | join(",")' <<<"$out")" == "zcrew_list,zcrew_send" ]]
+}
+
 test_3_tools_list_worker() {
     new_fake_zcrew
     local out
@@ -167,6 +196,7 @@ main() {
 
     run_test "1) initialize handshake returns server info" test_1_initialize_handshake
     run_test "2) orchestrator tools/list = zcrew_send + zcrew_list" test_2_tools_list_orchestrator
+    run_test "2b) host env with BX_INSIDE unset stays orchestrator despite parent BX_INSIDE=1" test_2b_tools_list_host_does_not_reimport_unset_bx_inside
     run_test "3) worker tools/list = zcrew_reply only" test_3_tools_list_worker
     run_test "4) worker calling zcrew_send rejected (unknown tool)" test_4_worker_cannot_call_send
     run_test "5) orchestrator calling zcrew_reply rejected (unknown tool)" test_5_orchestrator_cannot_call_reply

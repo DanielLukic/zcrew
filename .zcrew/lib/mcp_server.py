@@ -30,7 +30,6 @@ def inherit_env_from_parent():
         "XDG_DATA_HOME",
         "XDG_CONFIG_HOME",
         "XDG_CACHE_HOME",
-        "BX_INSIDE",
     ]
     if all(k in os.environ for k in needed):
         return
