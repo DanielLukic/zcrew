@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 
 const CASE_RUNNER = '/home/dl/Projects/zcrew/tests/helpers/codex-auto-reply-case.mjs';
-const ADAPTER = '/home/dl/Projects/zcrew/codex-auto-reply.sparky.mjs';
+const ADAPTER = '/home/dl/Projects/zcrew/.zcrew/lib/codex-auto-reply.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
