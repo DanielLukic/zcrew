@@ -66,9 +66,23 @@ const scripts = {
   live_after_idle: {
     threadStarted: 'th1',
     idleThread: 'th1',
-    onThreadRead: () => ({
-      thread: { turns: [{ id: 'tu1', status: { type: 'completed' }, items: [{ type: 'agentMessage', text: 'first idle reply' }] }] },
-    }),
+    readCount: 0,
+    onThreadRead() {
+      this.readCount += 1;
+      if (this.readCount === 1) {
+        return {
+          thread: { turns: [{ id: 'tu1', status: { type: 'completed' }, items: [{ type: 'agentMessage', text: 'first idle reply' }] }] },
+        };
+      }
+      return {
+        thread: {
+          turns: [
+            { id: 'tu1', status: { type: 'completed' }, items: [{ type: 'agentMessage', text: 'first idle reply' }] },
+            { id: 'tu2', status: { type: 'completed' }, items: [{ type: 'agentMessage', text: 'live second turn' }] },
+          ],
+        },
+      };
+    },
     afterFirstResume: (sock) => {
       setTimeout(() => {
         sock.serverSend({ jsonrpc: '2.0', method: 'turn/started', params: { threadId: 'th1', turn: { id: 'tu2' } } });
@@ -109,9 +123,35 @@ const scripts = {
   },
   loaded_sweep: {
     loadedThreads: ['th1'],
+    onThreadRead: () => ({
+      thread: { turns: [{ id: 'tu1', status: { type: 'completed' }, items: [{ type: 'agentMessage', text: 'swept hello' }] }] },
+    }),
     afterFirstResume: (sock) => {
       sock.serverSend({ jsonrpc: '2.0', method: 'turn/started', params: { threadId: 'th1', turn: { id: 'tu1' } } });
       sock.serverSend({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'th1', turnId: 'tu1', item: { type: 'agentMessage', text: 'swept hello' } } });
+      sock.serverSend({ jsonrpc: '2.0', method: 'turn/completed', params: { threadId: 'th1', turn: { id: 'tu1' } } });
+    },
+  },
+  multi_item_turn_completed: {
+    loadedThreads: ['th1'],
+    onThreadRead: () => ({
+      thread: {
+        turns: [
+          {
+            id: 'tu1',
+            status: { type: 'completed' },
+            items: [
+              { type: 'agentMessage', text: 'short ack' },
+              { type: 'agentMessage', text: 'detailed final answer' },
+            ],
+          },
+        ],
+      },
+    }),
+    afterFirstResume: (sock) => {
+      sock.serverSend({ jsonrpc: '2.0', method: 'turn/started', params: { threadId: 'th1', turn: { id: 'tu1' } } });
+      sock.serverSend({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'th1', turnId: 'tu1', item: { type: 'agentMessage', text: 'short ack' } } });
+      sock.serverSend({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'th1', turnId: 'tu1', item: { type: 'agentMessage', text: 'detailed final answer' } } });
       sock.serverSend({ jsonrpc: '2.0', method: 'turn/completed', params: { threadId: 'th1', turn: { id: 'tu1' } } });
     },
   },

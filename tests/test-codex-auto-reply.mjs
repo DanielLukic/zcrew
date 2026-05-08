@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 
 const CASE_RUNNER = '/home/dl/Projects/zcrew/tests/helpers/codex-auto-reply-case.mjs';
-const ADAPTER = '/home/dl/Projects/zcrew/.zcrew/lib/codex-auto-reply.mjs';
+const ADAPTER = process.env.ADAPTER_PATH || '/home/dl/Projects/zcrew/.zcrew/lib/codex-auto-reply.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -77,11 +77,12 @@ async function runCase({ caseName, expectedCalls, expectedExit, expectedRpcMetho
 
 await runCase({ caseName: 'one', expectedCalls: ['reply hello'], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
 await runCase({ caseName: 'multi', expectedCalls: ['reply second'], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
-await runCase({ caseName: 'live_after_idle', expectedCalls: ['reply first idle reply', 'reply live second turn'], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
+await runCase({ caseName: 'live_after_idle', expectedCalls: ['reply first idle reply', 'reply live second turn'], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read', 'thread/read'] });
 await runCase({ caseName: 'tool_only', expectedCalls: [], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
 await runCase({ caseName: 'fallback_text', expectedCalls: ['reply fallback text'], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
 await runCase({ caseName: 'fallback_empty', expectedCalls: [], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
 await runCase({ caseName: 'disconnect', expectedCalls: [], expectedExit: 3, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
-await runCase({ caseName: 'loaded_sweep', expectedCalls: ['reply swept hello'], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume'] });
+await runCase({ caseName: 'loaded_sweep', expectedCalls: ['reply swept hello'], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
+await runCase({ caseName: 'multi_item_turn_completed', expectedCalls: ['reply detailed final answer'], expectedExit: 0, expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read'] });
 
 console.log('ok');
