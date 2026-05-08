@@ -121,6 +121,7 @@ if ! wait_for_port "$port"; then
 fi
 
 ZCREW_CODEX_WS_URL="$ws_url" \
+ZCREW_CODEX_STATE_DIR="$state_dir" \
   node "$project_dir/.zcrew/lib/codex-auto-reply.mjs" >>"$adapter_log" 2>&1 &
 adapter_pid=$!
 printf '%s\n' "$adapter_pid" > "$adapter_pid_file"
