@@ -971,9 +971,11 @@ seed_mcp_configs() {
       && mv "$tmp" "$pi_mcp" || rm -f "$tmp"
   fi
 
-  # Sandbox codex config.toml: codex worker uses the app-server adapter
-  # (.zcrew/lib/codex-auto-reply.mjs), not MCP. Strip any pre-existing
-  # [mcp_servers.zcrew] block. Preserve other tables.
+  # WORKER sandbox codex config.toml: codex workers use the app-server
+  # adapter (.zcrew/lib/codex-auto-reply.mjs), not MCP. Strip any
+  # pre-existing [mcp_servers.zcrew] block to avoid double-fire.
+  # Preserve other tables.  (The ORCHESTRATOR seed is in
+  # seed_orchestrator_configs below.)
   local codex_conf="$target/.bx/home/.codex/config.toml"
   if [[ -f "$codex_conf" ]] && grep -Fxq '[mcp_servers.zcrew]' "$codex_conf"; then
     tmp=$(mktemp "$codex_conf.tmp.XXXXXX")
@@ -984,6 +986,68 @@ seed_mcp_configs() {
       !skip { print }
     ' "$codex_conf" > "$tmp" && mv "$tmp" "$codex_conf" || rm -f "$tmp"
   fi
+}
+
+# Seed orchestrator-side configs so the user's own codex/pi pick up
+# zcrew_send + zcrew_list automatically from the installed project.
+seed_orchestrator_configs() {
+  local target="$1"
+  local target_abs
+  target_abs=$(realpath "$target")
+  local server_path="$target_abs/.zcrew/lib/mcp_server.py"
+  [[ -f "$server_path" ]] || return 0
+
+  # --- codex: merge [mcp_servers.zcrew] into <target>/.codex/config.toml ---
+  # Idempotent: if the block already exists with the correct args, skip.
+  # Preserves any other [mcp_servers.*] or unrelated keys.
+  local codex_dir="$target/.codex"
+  local codex_toml="$codex_dir/config.toml"
+  mkdir -p "$codex_dir"
+
+  if [[ -f "$codex_toml" ]] && grep -Fxq '[mcp_servers.zcrew]' "$codex_toml"; then
+    # Block exists — rewrite args to current path (idempotent update).
+    local tmp
+    tmp=$(mktemp "$codex_toml.tmp.XXXXXX")
+    awk -v server_path="$server_path" '
+      BEGIN { in_zcrew = 0; did_args = 0 }
+      /^\[mcp_servers\.zcrew\][[:space:]]*$/ { in_zcrew = 1; print; next }
+      in_zcrew && /^\[/ { in_zcrew = 0 }
+      in_zcrew && /^command[[:space:]]*=/ { print "command = \"python3\""; next }
+      in_zcrew && /^args[[:space:]]*=/ { print "args = [\"" server_path "\"]"; did_args = 1; next }
+      !in_zcrew { print }
+    ' "$codex_toml" > "$tmp" && mv "$tmp" "$codex_toml" || rm -f "$tmp"
+  else
+    # No existing block — append.
+    cat >> "$codex_toml" <<EOF
+
+[mcp_servers.zcrew]
+command = "python3"
+args = ["$server_path"]
+EOF
+  fi
+  echo "    .codex/config.toml (orchestrator zcrew MCP entry)"
+
+  # --- pi: symlink <target>/.pi/extensions/zcrew.ts -> ../../.zcrew/lib/pi-zcrew-ext.ts ---
+  local pi_ext_dir="$target/.pi/extensions"
+  local pi_ext_link="$pi_ext_dir/zcrew.ts"
+  local expected_target="../../.zcrew/lib/pi-zcrew-ext.ts"
+
+  mkdir -p "$pi_ext_dir"
+  if [[ -L "$pi_ext_link" ]]; then
+    if [[ "$(readlink "$pi_ext_link")" == "$expected_target" ]]; then
+      : # already correct
+    else
+      rm -f "$pi_ext_link"
+      ln -s "$expected_target" "$pi_ext_link"
+    fi
+  elif [[ -e "$pi_ext_link" ]]; then
+    # Existing real file — replace with symlink.
+    rm -f "$pi_ext_link"
+    ln -s "$expected_target" "$pi_ext_link"
+  else
+    ln -s "$expected_target" "$pi_ext_link"
+  fi
+  echo "    .pi/extensions/zcrew.ts -> $expected_target"
 }
 
 install_bootstrap() {
@@ -1027,6 +1091,7 @@ install_bootstrap() {
   fi
   seed_mcp_configs "$target"
   echo "    .mcp.json + sandbox MCP configs (zcrew server entry)"
+  seed_orchestrator_configs "$target"
 }
 
 # Install zcrew into a target project directory.
@@ -1200,6 +1265,7 @@ cmd_install() {
   echo "Next steps:"
   echo "  1. cd $target_abs"
   echo "  2. Restart claude in this dir to load the new skills."
+  echo "  3. codex orchestrator: first run will trust-prompt; accept once."
 }
 
 cmd_rename() {
