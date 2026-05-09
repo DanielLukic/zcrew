@@ -3180,6 +3180,113 @@ test_89_orphan_walk_preserves_state_when_identity_check_fails() {
   $ok
 }
 
+# ── Orchestrator-side seeding tests (codex MCP + pi extension) ──────────
+
+test_90_install_seeds_codex_config_toml() {
+  local d target_abs
+  d="$(new_test_dir 90)"
+  mkdir -p "$d"
+
+  zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
+  target_abs=$(realpath "$d")
+
+  # .codex/config.toml exists with [mcp_servers.zcrew] block
+  [[ -f "$d/.codex/config.toml" ]] || return 1
+  grep -Fxq '[mcp_servers.zcrew]' "$d/.codex/config.toml" || return 1
+  grep -Fq 'command = "python3"' "$d/.codex/config.toml" || return 1
+  grep -Fq "${target_abs}/.zcrew/lib/mcp_server.py" "$d/.codex/config.toml"
+}
+
+test_91_install_seeds_pi_extension_symlink() {
+  local d target_abs
+  d="$(new_test_dir 91)"
+  mkdir -p "$d"
+
+  zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
+  target_abs=$(realpath "$d")
+
+  # .pi/extensions/zcrew.ts is a symlink to ../../.zcrew/lib/pi-zcrew-ext.ts
+  [[ -L "$d/.pi/extensions/zcrew.ts" ]] || return 1
+  [[ "$(readlink "$d/.pi/extensions/zcrew.ts")" == '../../.zcrew/lib/pi-zcrew-ext.ts' ]] || return 1
+  # Symlink resolves to the real file
+  [[ -f "$d/.pi/extensions/zcrew.ts" ]]
+}
+
+test_92_install_codex_and_pi_seeding_is_idempotent() {
+  local d before_codex after_codex before_pi after_pi
+  d="$(new_test_dir 92)"
+  mkdir -p "$d"
+
+  zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
+  before_codex=$(cat "$d/.codex/config.toml")
+  before_pi=$(readlink "$d/.pi/extensions/zcrew.ts")
+
+  zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
+  after_codex=$(cat "$d/.codex/config.toml")
+  after_pi=$(readlink "$d/.pi/extensions/zcrew.ts")
+
+  [[ "$before_codex" == "$after_codex" ]] || return 1
+  [[ "$before_pi" == "$after_pi" ]]
+}
+
+test_93_install_codex_config_preserves_other_mcp_servers() {
+  local d
+  d="$(new_test_dir 93)"
+  mkdir -p "$d/.codex"
+  cat > "$d/.codex/config.toml" <<'TOML'
+[model]
+name = "gpt-4"
+
+[mcp_servers.other_thing]
+command = "echo"
+args = ["hello"]
+TOML
+
+  zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
+
+  # other_thing block preserved
+  grep -Fxq '[mcp_servers.other_thing]' "$d/.codex/config.toml" || return 1
+  grep -Fq 'command = "echo"' "$d/.codex/config.toml" || return 1
+  # Unrelated keys preserved
+  grep -Fq 'name = "gpt-4"' "$d/.codex/config.toml" || return 1
+  # zcrew block added
+  grep -Fxq '[mcp_servers.zcrew]' "$d/.codex/config.toml"
+}
+
+test_94_install_codex_config_preserves_unrelated_keys() {
+  local d
+  d="$(new_test_dir 94)"
+  mkdir -p "$d/.codex"
+  cat > "$d/.codex/config.toml" <<'TOML'
+[chat]
+auto_compact = true
+
+[notifications]
+enabled = false
+TOML
+
+  zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
+
+  grep -Fq 'auto_compact = true' "$d/.codex/config.toml" || return 1
+  grep -Fq 'enabled = false' "$d/.codex/config.toml" || return 1
+  grep -Fxq '[mcp_servers.zcrew]' "$d/.codex/config.toml"
+}
+
+test_95_install_pi_extensions_preserves_other_extensions() {
+  local d
+  d="$(new_test_dir 95)"
+  mkdir -p "$d/.pi/extensions"
+  printf '// user extension\n' > "$d/.pi/extensions/user-ext.ts"
+
+  zcrew_cmd "$TEST_ROOT" install "$d" >/dev/null 2>&1 || return 1
+
+  # User extension still present
+  [[ -f "$d/.pi/extensions/user-ext.ts" ]] || return 1
+  [[ "$(cat "$d/.pi/extensions/user-ext.ts")" == '// user extension' ]] || return 1
+  # zcrew symlink added
+  [[ -L "$d/.pi/extensions/zcrew.ts" ]]
+}
+
 main() {
   mkdir -p "$TEST_ROOT"
 
@@ -3339,6 +3446,12 @@ main() {
   run_test "87) reconcile with empty live list skips orphan walk" test_87_reconcile_empty_live_skips_orphan_walk
   run_test "88) cleanup preserves state when identity check fails (close path)" test_88_cleanup_preserves_state_when_identity_check_fails
   run_test "89) orphan walk preserves state when identity check fails" test_89_orphan_walk_preserves_state_when_identity_check_fails
+  run_test "90) install seeds .codex/config.toml with zcrew MCP entry" test_90_install_seeds_codex_config_toml
+  run_test "91) install seeds .pi/extensions/zcrew.ts symlink" test_91_install_seeds_pi_extension_symlink
+  run_test "92) install codex/pi seeding is idempotent" test_92_install_codex_and_pi_seeding_is_idempotent
+  run_test "93) install codex config preserves other MCP servers" test_93_install_codex_config_preserves_other_mcp_servers
+  run_test "94) install codex config preserves unrelated keys" test_94_install_codex_config_preserves_unrelated_keys
+  run_test "95) install pi extensions preserves other extensions" test_95_install_pi_extensions_preserves_other_extensions
 
   echo ""
   echo "Total: $PASS_COUNT PASS, $FAIL_COUNT FAIL"
