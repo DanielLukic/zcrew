@@ -1333,6 +1333,40 @@ test_20b_find_project_root_fails_outside_zcrew_tree() {
   printf '%s\n' "$out" | grep -Fq "no .zcrew/ found from $other_dir upward"
 }
 
+test_20c_find_project_root_worktree_uses_main_registry() {
+  local d main_repo worktree_dir out
+  d="$(new_test_dir 20c)"
+  main_repo="$d/main-repo"
+  worktree_dir="$d/feature-worktree"
+  mkdir -p "$main_repo"
+
+  git -C "$main_repo" init >/dev/null 2>&1 || return 1
+  git -C "$main_repo" config user.name "zcrew-tests" || return 1
+  git -C "$main_repo" config user.email "zcrew-tests@example.com" || return 1
+  mkdir -p "$main_repo/.zcrew"
+  printf '{"panes":{"main":{"paneId":"42","sessionId":"s42","agent":"codex","cwd":"%s","pid":42,"lastSeen":1,"status":"alive"}}}\n' "$main_repo" > "$main_repo/.zcrew/registry.json" || return 1
+  printf '' > "$main_repo/.zcrew/registry.lock" || return 1
+  printf '' > "$main_repo/.zcrew/audit.log" || return 1
+  mkdir -p "$main_repo/.zcrew/spawn"
+  printf 'seed\n' > "$main_repo/seed.txt"
+  git -C "$main_repo" add seed.txt || return 1
+  git -C "$main_repo" add -f .zcrew || return 1
+  git -C "$main_repo" commit -m "seed" >/dev/null 2>&1 || return 1
+
+  git -C "$main_repo" worktree add "$worktree_dir" -b feature >/dev/null 2>&1 || return 1
+
+  jq '.panes.main.paneId = "99"' "$main_repo/.zcrew/registry.json" > "$main_repo/.zcrew/registry.json.tmp" || return 1
+  mv "$main_repo/.zcrew/registry.json.tmp" "$main_repo/.zcrew/registry.json"
+
+  out="$(
+    cd "$worktree_dir" || exit 1
+    env -u BX_INSIDE ZCREW_AUTO_SYNC=0 "$ZCREW_BIN" list --json
+  )" || return 1
+
+  printf '%s\n' "$out" | jq -e '.panes.main.paneId == "99"' >/dev/null || return 1
+  jq -e '.panes.main.paneId == "42"' "$worktree_dir/.zcrew/registry.json" >/dev/null
+}
+
 test_21_list_auto_sync_prunes_dead_entries() {
   local d mockbin out
   d="$(new_test_dir 21)"
@@ -3203,6 +3237,7 @@ main() {
   run_test "19) find_project_root uses state from project root" test_19_find_project_root_from_root_uses_local_state
   run_test "20) find_project_root walks up from subdir" test_20_find_project_root_walks_up_from_subdir
   run_test "20b) find_project_root fails outside zcrew tree" test_20b_find_project_root_fails_outside_zcrew_tree
+  run_test "20c) find_project_root redirects worktree to main registry" test_20c_find_project_root_worktree_uses_main_registry
   run_test "21) list auto-sync prunes dead entries by default" test_21_list_auto_sync_prunes_dead_entries
   run_test "22) ZCREW_AUTO_SYNC=0 preserves raw registry state" test_22_list_env_opt_out_preserves_fixture
   run_test "23) spawn implicit sync registers existing live panes before later checks" test_23_spawn_implicit_sync_registers_existing_live_pane
