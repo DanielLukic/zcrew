@@ -3,9 +3,25 @@
 set -euo pipefail
 
 find_project_root() {
+  if [[ -n "${ZCREW_PROJECT_DIR:-}" && -d "${ZCREW_PROJECT_DIR}/.zcrew" ]]; then
+    printf '%s\n' "$ZCREW_PROJECT_DIR"
+    return 0
+  fi
+
   local dir="${1:-$PWD}"
   while true; do
     if [[ -d "$dir/.zcrew" ]]; then
+      if [[ -f "$dir/.git" ]]; then
+        local git_common_dir main_root
+        git_common_dir="$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+        if [[ -n "$git_common_dir" ]]; then
+          main_root="${git_common_dir%/.git}"
+          if [[ -d "$main_root/.zcrew" ]]; then
+            printf '%s\n' "$main_root"
+            return 0
+          fi
+        fi
+      fi
       printf '%s\n' "$dir"
       return 0
     fi
