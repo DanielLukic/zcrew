@@ -122,6 +122,12 @@ await runCaseClean({ caseName: 'multi_item_turn_completed', expectedCalls: ['rep
   assert.ok(fs.existsSync(repliedFile), 'replied.json should exist after send');
   const keys = JSON.parse(fs.readFileSync(repliedFile, 'utf8'));
   assert.ok(keys.includes('th1:tu1'), `replied.json should contain th1:tu1, got ${JSON.stringify(keys)}`);
+  const initCall = readRpcCalls(path.join(tmp, 'rpc-calls.txt')).find((entry) => entry.method === 'initialize');
+  assert.deepEqual(
+    initCall?.params?.capabilities,
+    { experimentalApi: true },
+    `initialize.capabilities should include experimentalApi: true, got ${JSON.stringify(initCall?.params?.capabilities)}`,
+  );
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 

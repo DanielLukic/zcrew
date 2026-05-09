@@ -180,12 +180,14 @@ class FakeWsServer {
   constructor() {
     this.resumed = new Set();
     this.idleSent = new Set();
+    this.capabilities = null;
   }
 
   onClientMessage(sock, msg) {
     if (msg.method) recordRpcCall(msg.method, msg.params || {});
 
     if (msg.method === 'initialize') {
+      this.capabilities = msg.params?.capabilities ?? null;
       setImmediate(() => {
         sock.serverSend({ jsonrpc: '2.0', id: msg.id, result: {} });
       });
@@ -218,6 +220,18 @@ class FakeWsServer {
     }
     if (msg.method === 'thread/resume') {
       setImmediate(() => {
+        const hasExperimentalApi = this.capabilities?.experimentalApi === true;
+        if (msg.params?.excludeTurns === true && !hasExperimentalApi) {
+          sock.serverSend({
+            jsonrpc: '2.0',
+            id: msg.id,
+            error: {
+              code: -32602,
+              message: 'thread/resume.excludeTurns requires experimentalApi capability',
+            },
+          });
+          return;
+        }
         sock.serverSend({ jsonrpc: '2.0', id: msg.id, result: { thread: { id: msg.params.threadId, turns: [] } } });
         if (!this.resumed.has(msg.params.threadId)) {
           this.resumed.add(msg.params.threadId);

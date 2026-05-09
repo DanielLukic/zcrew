@@ -255,6 +255,7 @@ async function main() {
           const ok = await runZcrewReply(fallback);
           pendingTurns.delete(key);
           if (ok) { sentTurns.add(key); saveRepliedKeys(sentTurns); }
+        } else {
           log(`no non-empty agentMessage for ${key}`);
         }
       }
@@ -286,7 +287,7 @@ async function main() {
   await rpc.connect();
   await rpc.request('initialize', {
     clientInfo: { name: 'zcrew-codex-auto-reply', title: 'zcrew-codex-auto-reply', version: '0.1.0' },
-    capabilities: null,
+    capabilities: { experimentalApi: true },
   });
   rpc.notify('initialized', {});
 
