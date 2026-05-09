@@ -1568,7 +1568,7 @@ cmd_send() {
     if [[ "$target_agent" == "claude" || "$target_agent" == "codex" || "$target_agent" == "pi" ]]; then
       # Each managed worker auto-fires replies on its own:
       #   claude → SessionStop hook
-      #   codex  → app-server adapter on item/completed
+      #   codex  → app-server adapter on turn/completed
       #   pi     → native extension's agent_end handler
       # Worker just writes its result; no instructions needed.
       send_body="$message"
