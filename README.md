@@ -81,259 +81,33 @@ Available CLI commands for manual use: `zcrew spawn`, `send`, `close`, `list`, `
 
 ## MCP support for other agents
 
-zcrew install auto-wires claude, codex, and pi. For other agents, drop the snippet below into the agent's MCP config:
-
-```yaml
-command: python3
-args: ["/abs/path/to/project/.zcrew/lib/mcp_server.py"]
-```
-
-Use the absolute path to the project where zcrew is installed. Do not set `BX_INSIDE`; this is the orchestrator surface.
-
-### Gemini CLI
-
-File: `.gemini/settings.json` (project) or `~/.gemini/settings.json` (user). Format: JSON, key: `mcpServers`.
+zcrew install auto-wires claude, codex, and pi. For other agents, drop the canonical zcrew server entry into your agent's MCP config:
 
 ```json
-{
-  "mcpServers": {
-    "zcrew": {
-      "command": "python3",
-      "args": ["/abs/path/to/project/.zcrew/lib/mcp_server.py"]
-    }
-  }
-}
+{ "mcpServers": { "zcrew": { "command": "python3", "args": ["/abs/path/to/project/.zcrew/lib/mcp_server.py"] } } }
 ```
 
-### Cursor Agent
+Use the absolute project path. Do not set `BX_INSIDE`; this is the orchestrator surface. Setting `BX_INSIDE=1` exposes the worker reply surface instead. Most agents use top-level JSON `mcpServers`; some use TOML (Codex), YAML (Goose, Continue), or a different key such as Amp `amp.mcpServers`, Kilo `mcp`, or OpenCode `mcp`.
 
-File: `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (user). Format: JSON, key: `mcpServers`.
+Common config paths:
+- Gemini CLI: `.gemini/settings.json`
+- Cursor: `.cursor/mcp.json`
+- Droid: `.factory/mcp.json`
+- Amp: `.amp/settings.json`
+- OpenCode: `opencode.json`
+- Qwen: `.qwen/settings.json`
+- Auggie: `~/.augment/settings.json` or `--mcp-config`
+- OpenHands: `~/.openhands/mcp.json`
+- Goose: `~/.config/goose/config.yaml`
+- Continue: `config.yaml`
+- Cline: `~/.cline/data/settings/cline_mcp_settings.json`
+- Copilot CLI: `.mcp.json` (works automatically)
+- Kimi: `~/.kimi/mcp.json`
+- Amazon Q: `~/.aws/amazonq/cli-agents`
+- Roo: `.roo/mcp.json`
+- Kilo: `kilo.json`
 
-```json
-{
-  "mcpServers": {
-    "zcrew": {
-      "command": "python3",
-      "args": ["/abs/path/to/project/.zcrew/lib/mcp_server.py"]
-    }
-  }
-}
-```
-
-### Droid (Factory)
-
-File: `.factory/mcp.json` (project) or `~/.factory/mcp.json` (user). Format: JSON, key: `mcpServers`.
-
-```json
-{
-  "mcpServers": {
-    "zcrew": {
-      "type": "stdio",
-      "command": "python3",
-      "args": ["/abs/path/to/project/.zcrew/lib/mcp_server.py"],
-      "disabled": false
-    }
-  }
-}
-```
-
-### OpenCode
-
-File: `opencode.json` (project) or `~/.config/opencode/opencode.json` (user). Format: JSON/JSONC, key: `mcp`.
-
-```json
-{
-  "mcp": {
-    "zcrew": {
-      "type": "local",
-      "command": ["python3", "/abs/path/to/project/.zcrew/lib/mcp_server.py"],
-      "enabled": true
-    }
-  }
-}
-```
-
-### Amp
-
-File: `.amp/settings.json` (workspace) or `~/.config/amp/settings.json` (user). Format: JSON, key: `amp.mcpServers`.
-
-```json
-{
-  "amp.mcpServers": {
-    "zcrew": {
-      "command": "python3",
-      "args": ["/abs/path/to/project/.zcrew/lib/mcp_server.py"]
-    }
-  }
-}
-```
-
-### Qwen Code
-
-File: `.qwen/settings.json` (project) or `~/.qwen/settings.json` (user). Format: JSON, key: `mcpServers`.
-
-```json
-{
-  "mcpServers": {
-    "zcrew": {
-      "command": "python3",
-      "args": ["/abs/path/to/project/.zcrew/lib/mcp_server.py"]
-    }
-  }
-}
-```
-
-### Auggie (Augment)
-
-File: `.augment/settings.json` (project), `.augment/settings.local.json` (local project), or `~/.augment/settings.json` (user). Format: JSON5, key: `mcpServers`.
-
-```json
-{
-  "mcpServers": {
-    "zcrew": {
-      "command": "python3",
-      "args": ["/abs/path/to/project/.zcrew/lib/mcp_server.py"]
-    }
-  }
-}
-```
-
-### OpenHands
-
-File: `~/.openhands/mcp.json`. Format: JSON, key: `mcpServers`.
-
-```json
-{
-  "mcpServers": {
-    "zcrew": {
-      "command": "python3",
-      "args": ["/abs/path/to/project/.zcrew/lib/mcp_server.py"]
-    }
-  }
-}
-```
-
-### Goose
-
-File: `~/.config/goose/config.yaml`. Format: YAML, key: `extensions`.
-
-```yaml
-extensions:
-  - name: zcrew
-    enabled: true
-    transport:
-      type: stdio
-      command: python3
-      args:
-        - /abs/path/to/project/.zcrew/lib/mcp_server.py
-```
-
-### Continue CLI
-
-File: `config.yaml` for the selected Continue config, or `.continue/mcpServers/zcrew.yaml` in a workspace. Format: YAML, key: `mcpServers`.
-
-```yaml
-mcpServers:
-  - name: zcrew
-    command: python3
-    args:
-      - /abs/path/to/project/.zcrew/lib/mcp_server.py
-```
-
-### Cline CLI
-
-File: `~/.cline/data/settings/cline_mcp_settings.json`, or `<custom-config-dir>/data/settings/cline_mcp_settings.json` when using `CLINE_DIR` / `--config`. Format: JSON, key: `mcpServers`.
-
-```json
-{
-  "mcpServers": {
-    "zcrew": {
-      "command": "python3",
-      "args": ["/abs/path/to/project/.zcrew/lib/mcp_server.py"],
-      "disabled": false
-    }
-  }
-}
-```
-
-### Copilot CLI
-
-File: `.mcp.json` (workspace), `.github/mcp.json` (repository), or `~/.copilot/mcp-config.json` (user). Format: JSON, key: `mcpServers`.
-
-```json
-{
-  "mcpServers": {
-    "zcrew": {
-      "type": "local",
-      "command": "python3",
-      "args": ["/abs/path/to/project/.zcrew/lib/mcp_server.py"],
-      "tools": ["*"]
-    }
-  }
-}
-```
-
-### Kimi
-
-File: `~/.kimi/mcp.json`. Format: JSON, key: `mcpServers`.
-
-```json
-{
-  "mcpServers": {
-    "zcrew": {
-      "command": "python3",
-      "args": ["/abs/path/to/project/.zcrew/lib/mcp_server.py"]
-    }
-  }
-}
-```
-
-### Amazon Q
-
-File: `.amazonq/mcp.json` (workspace legacy) or `~/.aws/amazonq/mcp.json` (user legacy); agent configs under `~/.aws/amazonq/cli-agents/` use the same `mcpServers` block. Format: JSON, key: `mcpServers`.
-
-```json
-{
-  "mcpServers": {
-    "zcrew": {
-      "command": "python3",
-      "args": ["/abs/path/to/project/.zcrew/lib/mcp_server.py"]
-    }
-  }
-}
-```
-
-### Roo Code
-
-File: `.roo/mcp.json` (project) or Roo's global `mcp_settings.json`. Format: JSON, key: `mcpServers`.
-
-```json
-{
-  "mcpServers": {
-    "zcrew": {
-      "command": "python3",
-      "args": ["/abs/path/to/project/.zcrew/lib/mcp_server.py"],
-      "disabled": false
-    }
-  }
-}
-```
-
-### Kilo Code
-
-File: `kilo.json` or `.kilo/kilo.json` (project), or `~/.config/kilo/kilo.json` (user). Format: JSON/JSONC, key: `mcp`.
-
-```json
-{
-  "mcp": {
-    "zcrew": {
-      "type": "local",
-      "command": ["python3", "/abs/path/to/project/.zcrew/lib/mcp_server.py"],
-      "enabled": true
-    }
-  }
-}
-```
+Refer to your agent's MCP documentation for the exact format.
 
 ## ix (Incus) — alternative sandbox *(DISCLAIMER: Not integrated, yet!)*
 
