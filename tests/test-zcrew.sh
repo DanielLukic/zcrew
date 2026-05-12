@@ -5135,6 +5135,17 @@ test_91a_pi_extension_surfaces_reply_failures() {
   grep -Fq 'console.error("[zcrew] reply failed:", err)' "$src" || return 1
 }
 
+test_91b_codex_adapter_surfaces_reply_failures() {
+  local src="$REPO_ROOT/.zcrew/lib/codex-auto-reply.mjs"
+  grep -Fq "async function notifyAgentOfFailure" "$src" || return 1
+  grep -Fq "turn/start" "$src" || return 1
+  grep -Fq 'ADAPTER ERROR: zcrew failed to deliver this turn' "$src" || return 1
+  grep -Fq 'notifiedTurns' "$src" || return 1
+  # runZcrewReply now returns { ok, error } struct instead of plain boolean
+  grep -Fq 'return { ok: true }' "$src" || return 1
+  grep -Fq 'return { ok: false, error:' "$src" || return 1
+}
+
 test_92_install_codex_and_pi_seeding_is_idempotent() {
   local d before_codex after_codex before_pi after_pi
   d="$(new_test_dir 92)"
@@ -5516,6 +5527,7 @@ main() {
   run_test "90) install seeds .codex/config.toml with zcrew MCP entry" test_90_install_seeds_codex_config_toml
   run_test "91) install seeds .pi/extensions/zcrew.ts symlink" test_91_install_seeds_pi_extension_symlink
   run_test "91a) pi extension surfaces reply failures via steer + notify" test_91a_pi_extension_surfaces_reply_failures
+  run_test "91b) codex adapter surfaces reply failures via turn/start steer" test_91b_codex_adapter_surfaces_reply_failures
   run_test "92) install codex/pi seeding is idempotent" test_92_install_codex_and_pi_seeding_is_idempotent
   run_test "93) install codex config preserves other MCP servers" test_93_install_codex_config_preserves_other_mcp_servers
   run_test "94) install codex config preserves unrelated keys" test_94_install_codex_config_preserves_unrelated_keys

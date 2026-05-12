@@ -171,6 +171,16 @@ const scripts = {
       sock.serverSend({ jsonrpc: '2.0', method: 'turn/completed', params: { threadId: 'th1', turn: { id: 'tu1' } } });
     },
   },
+  reply_failure_triggers_turn_start: {
+    loadedThreads: ['th1'],
+    onThreadRead: () => ({
+      thread: { turns: [{ id: 'tu1', status: { type: 'completed' }, items: [{ type: 'agentMessage', text: 'fail me' }] }] },
+    }),
+    afterFirstResume: (sock) => {
+      sock.serverSend({ jsonrpc: '2.0', method: 'turn/started', params: { threadId: 'th1', turn: { id: 'tu1' } } });
+      sock.serverSend({ jsonrpc: '2.0', method: 'turn/completed', params: { threadId: 'th1', turn: { id: 'tu1' } } });
+    },
+  },
 };
 
 const script = scripts[caseName];

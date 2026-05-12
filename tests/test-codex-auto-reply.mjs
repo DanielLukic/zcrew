@@ -20,12 +20,13 @@ function readRpcCalls(file) {
   return readCalls(file).map((line) => JSON.parse(line));
 }
 
-async function runCase({ caseName, expectedCalls, expectedExit, expectedRpcMethods = [], settleMs = 200, seedRepliedKeys = [] }) {
+async function runCase({ caseName, expectedCalls, expectedExit, expectedRpcMethods = [], settleMs = 200, seedRepliedKeys = [], zcrewFail = false }) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-auto-reply-case-'));
   const callsFile = path.join(tmp, 'calls.txt');
   const rpcCallsFile = path.join(tmp, 'rpc-calls.txt');
   const zcrewBin = path.join(tmp, 'zcrew');
-  fs.writeFileSync(zcrewBin, `#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"${callsFile}\"\n`, { mode: 0o755 });
+  const failLine = zcrewFail ? 'exit 1\n' : '';
+  fs.writeFileSync(zcrewBin, `#!/usr/bin/env bash\nprintf '%s\n' "$*" >> "${callsFile}"\n${failLine}`, { mode: 0o755 });
 
   const stateDir = path.join(tmp, 'state');
   fs.mkdirSync(stateDir, { recursive: true });
@@ -128,6 +129,28 @@ await runCaseClean({ caseName: 'multi_item_turn_completed', expectedCalls: ['rep
     undefined,
     `initialize should not include capabilities, got ${JSON.stringify(initCall?.params?.capabilities)}`,
   );
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
+
+// reply failure triggers turn/start steer message
+{
+  const { tmp, stateDir } = await runCase({
+    caseName: 'reply_failure_triggers_turn_start',
+    expectedCalls: ['reply fail me'],
+    expectedExit: 0,
+    zcrewFail: true,
+    expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read', 'turn/start'],
+  });
+  const rpcCalls = readRpcCalls(path.join(tmp, 'rpc-calls.txt'));
+  const turnStart = rpcCalls.find((c) => c.method === 'turn/start');
+  assert.ok(turnStart, 'turn/start should be called on reply failure');
+  assert.equal(turnStart.params.threadId, 'th1', 'turn/start should target th1');
+  assert.ok(
+    turnStart.params.input?.[0]?.text?.includes('ADAPTER ERROR'),
+    `turn/start text should contain ADAPTER ERROR, got ${JSON.stringify(turnStart.params.input)}`,
+  );
+  const repliedFile = path.join(stateDir, 'replied.json');
+  assert.ok(!fs.existsSync(repliedFile), 'replied.json should NOT be written on failed reply');
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 

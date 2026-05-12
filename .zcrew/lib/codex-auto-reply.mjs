@@ -103,17 +103,32 @@ class RpcClient {
 
 async function runZcrewReply(text) {
   const msg = text.trim();
-  if (!msg) return false;
+  if (!msg) return { ok: false, error: 'empty message' };
   try {
     const { stdout, stderr } = await execFileAsync(ZCREW_BIN, ['reply', msg]);
     const out = [stdout?.trim(), stderr?.trim()].filter(Boolean).join('\n');
     log(`zcrew reply sent${out ? `: ${out}` : ''}`);
-    return true;
+    return { ok: true };
   } catch (err) {
     const e = err;
     const out = [e.stdout?.trim(), e.stderr?.trim(), e.message].filter(Boolean).join('\n');
     log(`zcrew reply failed: ${out}`);
-    return false;
+    return { ok: false, error: out };
+  }
+}
+
+async function notifyAgentOfFailure(rpc, threadId, errorMsg) {
+  const steerText =
+    'ADAPTER ERROR: zcrew failed to deliver this turn\'s reply (' +
+    errorMsg +
+    '). Please attempt to inform the user, retry, or escalate.';
+  try {
+    await rpc.request('turn/start', {
+      threadId,
+      input: [{ type: 'text', text: steerText }],
+    });
+  } catch (notifyErr) {
+    log(`notifyAgentOfFailure failed: ${notifyErr?.message || notifyErr}`);
   }
 }
 
@@ -185,6 +200,7 @@ async function main() {
   const sentTurns = loadRepliedKeys();
   const pendingTurns = new Set();
   const openTurns = new Set();
+  const notifiedTurns = new Set();
   const subscribedThreads = new Set();
   const resumingThreads = new Map();
   let shuttingDown = false;
@@ -247,9 +263,14 @@ async function main() {
         }
 
         pendingTurns.add(key);
-        const ok = await runZcrewReply(fallback);
+        const { ok, error } = await runZcrewReply(fallback);
         pendingTurns.delete(key);
-        if (ok) { sentTurns.add(key); saveRepliedKeys(sentTurns); }
+        if (ok) {
+          sentTurns.add(key); saveRepliedKeys(sentTurns);
+        } else if (!notifiedTurns.has(key)) {
+          notifiedTurns.add(key);
+          await notifyAgentOfFailure(rpc, threadId, error || 'unknown');
+        }
         return;
       }
 
@@ -273,9 +294,14 @@ async function main() {
         if (fallback.trim()) {
           if (pendingTurns.has(key)) return;
           pendingTurns.add(key);
-          const ok = await runZcrewReply(fallback);
+          const { ok, error } = await runZcrewReply(fallback);
           pendingTurns.delete(key);
-          if (ok) { sentTurns.add(key); saveRepliedKeys(sentTurns); }
+          if (ok) {
+            sentTurns.add(key); saveRepliedKeys(sentTurns);
+          } else if (!notifiedTurns.has(key)) {
+            notifiedTurns.add(key);
+            await notifyAgentOfFailure(rpc, params.threadId, error || 'unknown');
+          }
         } else {
           log(`no non-empty agentMessage for ${key}`);
         }
