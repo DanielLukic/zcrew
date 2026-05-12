@@ -101,6 +101,14 @@ class RpcClient {
   }
 }
 
+async function logError(agent, message) {
+  try {
+    await execFileAsync(ZCREW_BIN, ['log-error', agent, message]);
+  } catch {
+    /* fail silently — don't cascade adapter errors */
+  }
+}
+
 async function runZcrewReply(text) {
   const msg = text.trim();
   if (!msg) return { ok: false, error: 'empty message' };
@@ -113,6 +121,7 @@ async function runZcrewReply(text) {
     const e = err;
     const out = [e.stdout?.trim(), e.stderr?.trim(), e.message].filter(Boolean).join('\n');
     log(`zcrew reply failed: ${out}`);
+    await logError('codex', `zcrew reply failed: ${out}`);
     return { ok: false, error: out };
   }
 }

@@ -56,6 +56,18 @@ function resolveZcrewBin(): string {
 const ZCREW_BIN = resolveZcrewBin();
 
 // ---------------------------------------------------------------------------
+// Error logging
+// ---------------------------------------------------------------------------
+
+async function logError(agent: string, message: string) {
+  try {
+    await execFileAsync(ZCREW_BIN, ["log-error", agent, message]);
+  } catch {
+    /* fail silently — don't cascade adapter errors */
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Shell-out helper
 // ---------------------------------------------------------------------------
 
@@ -133,6 +145,7 @@ export default function (pi: ExtensionAPI): void {
           await runZcrew(replyArgs({ message: text }));
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : String(err);
+          await logError("pi", `zcrew reply failed: ${msg}`);
           console.error("[zcrew] reply failed:", err);
           pi.notify("zcrew reply failed: " + msg, "error");
           pi.sendUserMessage(

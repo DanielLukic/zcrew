@@ -2120,6 +2120,47 @@ cmd_reply() {
   cmd_send main "$@"
 }
 
+cmd_log_error() {
+  local agent="${1:-unknown}"
+  shift || true
+  local message="${*:-}"
+  [[ -n "$message" ]] || return 0
+
+  local pane_name="${ZCREW_PANE_NAME:-${ZELLIJ_PANE_NAME:-${TMUX_PANE:-unknown}}}"
+  local project_dir
+  if ! project_dir="$(resolve_project_dir 2>/dev/null)"; then
+    project_dir="${ZCREW_PROJECT_DIR:-}"
+  fi
+  [[ -n "$project_dir" && -d "$project_dir/.zcrew" ]] || {
+    printf 'zcrew log-error: no project dir resolved, dropping: [%s] %s\n' "$agent" "$message" >&2
+    return 1
+  }
+
+  local state_dir="$project_dir/.zcrew/state"
+  local log_file="$state_dir/errors.log"
+  local ts
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf '%s\n' 'unknown')"
+
+  # Best-effort mkdir; fail silently if unwritable
+  [[ -d "$state_dir" ]] || mkdir -p "$state_dir" 2>/dev/null || {
+    printf 'zcrew log-error: cannot create state dir, dropping: [%s] %s\n' "$agent" "$message" >&2
+    return 1
+  }
+
+  # Sanitize: collapse newlines/tabs in message to spaces, strip control chars
+  local sanitized
+  sanitized="$(printf '%s' "$message" | tr '\n\t' '  ' | tr -d '[:cntrl:]')"
+
+  # flock-protected atomic append; fail silently if flock or write fails
+  {
+    flock -x 9 2>/dev/null || { printf 'zcrew log-error: cannot acquire lock, dropping: [%s] %s\n' "$agent" "$sanitized" >&2; return 1; }
+    printf '%s\t%s\t%s\t%s\n' "$ts" "$agent" "$pane_name" "$sanitized" >>"$log_file" 2>/dev/null || {
+      printf 'zcrew log-error: cannot write log, dropping: [%s] %s\n' "$agent" "$sanitized" >&2
+      return 1
+    }
+  } 9>>"$log_file"
+}
+
 cmd_claim() {
   CURRENT_SUBCMD="claim"
 
@@ -2307,6 +2348,7 @@ main() {
     list) dispatch_registry_command cmd_list "$@" ;;
     sync) cmd_sync "$@" ;;
     gc) cmd_gc "$@" ;;
+    log-error) cmd_log_error "$@" ;;
     *)
       cat <<USAGE
 Usage: zcrew <command>
@@ -2323,6 +2365,7 @@ Commands:
   list [--json]
   sync [--keep-stale|--prune]
   gc [--force]
+  log-error <agent> <message>
   register <name> [--paneId X] [--sessionId Y] [--agent A] [--cwd P] [--pid N] [--status S]
 USAGE
       exit 1

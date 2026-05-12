@@ -107,6 +107,7 @@ fi
 
 reason="ADAPTER ERROR: zcrew failed to deliver this turn's reply (${sanitized:-unknown}). Please attempt to inform the user, retry the action that requires the reply, or escalate."
 printf 'zcrew stop-hook: reply failed, asking claude to handle: %s\n' "$sanitized" >&2
+"$zcrew_bin" log-error claude "zcrew reply failed: ${sanitized:-unknown}" >/dev/null 2>&1 || true
 
 decision_json="$(jq -nc --arg reason "$reason" '{decision:"block", reason:$reason}' 2>/dev/null)" || true
 if [[ -z "$decision_json" ]]; then

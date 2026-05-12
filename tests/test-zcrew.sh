@@ -5326,6 +5326,89 @@ EOF
   printf '%s\n' "$stderr" | grep -Fq 'failed to construct decision JSON' || return 1
 }
 
+test_91h_log_error_appends_correct_format() {
+  local d log_line
+  d="$(new_test_dir 91h)"
+  mkdir -p "$d"
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+
+  (cd "$d" && env -u BX_INSIDE "$ZCREW_BIN" log-error codex "boom msg") >/dev/null 2>&1 || return 1
+
+  [[ -f "$d/.zcrew/state/errors.log" ]] || return 1
+  log_line="$(tail -n 1 "$d/.zcrew/state/errors.log")"
+  [[ -n "$log_line" ]] || return 1
+  # tab-separated: timestamp agent pane message
+  printf '%s\n' "$log_line" | grep -q $'\tcodex\tunknown\tboom msg' || return 1
+}
+
+test_91i_log_error_concurrent_appends_are_atomic() {
+  local d i pids
+  d="$(new_test_dir 91i)"
+  mkdir -p "$d"
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+
+  pids=()
+  for i in $(seq 1 10); do
+    (cd "$d" && env -u BX_INSIDE "$ZCREW_BIN" log-error claude "msg-$i") >/dev/null 2>&1 &
+    pids+=($!)
+  done
+  for p in "${pids[@]}"; do wait "$p"; done
+
+  local count
+  count="$(wc -l < "$d/.zcrew/state/errors.log" | tr -d ' ')"
+  [[ "$count" -eq 10 ]] || return 1
+
+  # Every line must be well-formed (4 tab-separated fields → 3 tabs)
+  while IFS= read -r line; do
+    local tabs
+    tabs="$(printf '%s' "$line" | tr -cd '\t' | wc -c | tr -d ' ')"
+    [[ "$tabs" -eq 3 ]] || return 1
+  done < "$d/.zcrew/state/errors.log"
+}
+
+test_91j_log_error_creates_state_dir_lazily() {
+  local d
+  d="$(new_test_dir 91j)"
+  mkdir -p "$d"
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  rm -rf "$d/.zcrew/state"
+
+  (cd "$d" && env -u BX_INSIDE "$ZCREW_BIN" log-error pi "lazy dir") >/dev/null 2>&1 || return 1
+  [[ -d "$d/.zcrew/state" ]] || return 1
+  [[ -f "$d/.zcrew/state/errors.log" ]] || return 1
+}
+
+test_91k_log_error_readonly_state_fails_silently() {
+  local d rc
+  d="$(new_test_dir 91k)"
+  mkdir -p "$d"
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  mkdir -p "$d/.zcrew/state"
+  chmod 000 "$d/.zcrew/state"
+
+  rc=0
+  (cd "$d" && env -u BX_INSIDE "$ZCREW_BIN" log-error claude "readonly test" >/dev/null 2>&1) || rc=$?
+  chmod 755 "$d/.zcrew/state"
+  [[ "$rc" -ne 0 ]] || return 1
+}
+
+test_91l_stop_hook_calls_log_error_on_failure() {
+  local src="$REPO_ROOT/.zcrew/lib/stop-hook.sh"
+  grep -Fq '"$zcrew_bin" log-error claude' "$src" || return 1
+}
+
+test_91m_codex_adapter_calls_log_error_on_failure() {
+  local src="$REPO_ROOT/.zcrew/lib/codex-auto-reply.mjs"
+  grep -Fq "await logError('codex'" "$src" || return 1
+  grep -Fq 'zcrew reply failed:' "$src" || return 1
+}
+
+test_91n_pi_extension_calls_log_error_on_failure() {
+  local src="$REPO_ROOT/.zcrew/lib/pi-zcrew-ext.ts"
+  grep -Fq 'await logError("pi"' "$src" || return 1
+  grep -Fq 'zcrew reply failed:' "$src" || return 1
+}
+
 test_92_install_codex_and_pi_seeding_is_idempotent() {
   local d before_codex after_codex before_pi after_pi
   d="$(new_test_dir 92)"
@@ -5713,6 +5796,13 @@ main() {
   run_test "91e) stop-hook with stop_hook_active true avoids loop" test_91e_stop_hook_failure_with_stop_hook_active_avoids_loop
   run_test "91f) stop-hook block JSON is valid and has non-empty reason" test_91f_stop_hook_block_json_is_valid
   run_test "91g) stop-hook errors on jq failure instead of silent exit 0" test_91g_stop_hook_errors_on_jq_failure
+  run_test "91h) log-error appends correct tab-separated format" test_91h_log_error_appends_correct_format
+  run_test "91i) log-error concurrent appends are atomic" test_91i_log_error_concurrent_appends_are_atomic
+  run_test "91j) log-error creates state dir lazily" test_91j_log_error_creates_state_dir_lazily
+  run_test "91k) log-error readonly state fails silently" test_91k_log_error_readonly_state_fails_silently
+  run_test "91l) stop-hook calls log-error on failure path" test_91l_stop_hook_calls_log_error_on_failure
+  run_test "91m) codex adapter calls log-error on failure path" test_91m_codex_adapter_calls_log_error_on_failure
+  run_test "91n) pi extension calls log-error on failure path" test_91n_pi_extension_calls_log_error_on_failure
   run_test "92) install codex/pi seeding is idempotent" test_92_install_codex_and_pi_seeding_is_idempotent
   run_test "93) install codex config preserves other MCP servers" test_93_install_codex_config_preserves_other_mcp_servers
   run_test "94) install codex config preserves unrelated keys" test_94_install_codex_config_preserves_unrelated_keys

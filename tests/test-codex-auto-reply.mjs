@@ -26,7 +26,7 @@ async function runCase({ caseName, expectedCalls, expectedExit, expectedRpcMetho
   const rpcCallsFile = path.join(tmp, 'rpc-calls.txt');
   const zcrewBin = path.join(tmp, 'zcrew');
   const failLine = zcrewFail ? 'exit 1\n' : '';
-  fs.writeFileSync(zcrewBin, `#!/usr/bin/env bash\nprintf '%s\n' "$*" >> "${callsFile}"\n${failLine}`, { mode: 0o755 });
+  fs.writeFileSync(zcrewBin, `#!/usr/bin/env bash\n[[ "$1" == "log-error" ]] || printf '%s\n' "$*" >> "${callsFile}"\n${failLine}`, { mode: 0o755 });
 
   const stateDir = path.join(tmp, 'state');
   fs.mkdirSync(stateDir, { recursive: true });
