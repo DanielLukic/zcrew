@@ -5280,6 +5280,52 @@ EOF
   [[ -n "$reason" ]] || return 1
 }
 
+test_91g_stop_hook_errors_on_jq_failure() {
+  local d hook_input stdout rc fake_zcrew fake_jq stderr
+  d="$(new_test_dir 91g)"
+  hook_input='{"last_assistant_message":"hello"}'
+  mkdir -p "$d"
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  seed_local_lib_fixture "$d"
+  cat > "$d/.zcrew/lib/tell" <<'EOF'
+#!/usr/bin/env bash
+echo "boom" >&2
+exit 1
+EOF
+  chmod +x "$d/.zcrew/lib/tell"
+  fake_zcrew="$d/fake-zcrew"
+  cat > "$fake_zcrew" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1" == "reply" ]]; then
+  shift
+  exec "$d/.zcrew/lib/tell" reply "\$@"
+fi
+exec "$ZCREW_BIN" "\$@"
+EOF
+  chmod +x "$fake_zcrew"
+
+  fake_jq="$d/jq"
+  cat > "$fake_jq" <<'EOF'
+#!/usr/bin/env bash
+# Only fail when constructing the block JSON (has --arg reason)
+for arg in "$@"; do
+  if [[ "$arg" == "--arg" ]]; then
+    echo "fake-jq: failing on purpose" >&2
+    exit 1
+  fi
+done
+# Otherwise delegate to real jq
+exec /usr/bin/jq "$@"
+EOF
+  chmod +x "$fake_jq"
+
+  stderr="$(printf '%s\n' "$hook_input" | env -u BX_INSIDE BX_INSIDE=1 ZCREW_BIN="$fake_zcrew" PATH="$d:$PATH" \
+    "$d/.zcrew/lib/stop-hook.sh" 2>&1 >/dev/null)"
+  rc=$?
+  [[ $rc -ne 0 ]] || return 1
+  printf '%s\n' "$stderr" | grep -Fq 'failed to construct decision JSON' || return 1
+}
+
 test_92_install_codex_and_pi_seeding_is_idempotent() {
   local d before_codex after_codex before_pi after_pi
   d="$(new_test_dir 92)"
@@ -5666,6 +5712,7 @@ main() {
   run_test "91d) stop-hook failure emits decision:block JSON" test_91d_stop_hook_failure_emits_block_json
   run_test "91e) stop-hook with stop_hook_active true avoids loop" test_91e_stop_hook_failure_with_stop_hook_active_avoids_loop
   run_test "91f) stop-hook block JSON is valid and has non-empty reason" test_91f_stop_hook_block_json_is_valid
+  run_test "91g) stop-hook errors on jq failure instead of silent exit 0" test_91g_stop_hook_errors_on_jq_failure
   run_test "92) install codex/pi seeding is idempotent" test_92_install_codex_and_pi_seeding_is_idempotent
   run_test "93) install codex config preserves other MCP servers" test_93_install_codex_config_preserves_other_mcp_servers
   run_test "94) install codex config preserves unrelated keys" test_94_install_codex_config_preserves_unrelated_keys
