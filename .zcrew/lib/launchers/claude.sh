@@ -35,7 +35,7 @@ if command -v jq >/dev/null 2>&1; then
         .hooks = ((.hooks // []) | map(select(
           (.type != "command") or
           ((.command | type) != "string") or
-          (.command != $legacy_cmd)
+          (.command != $legacy_cmd and (.command == $cmd or (.command | test("/\\.zcrew/lib/stop-hook\\.sh$") | not)))
         )))
       ) | map(select((.hooks // []) | length > 0)))
     | if ([.hooks.Stop[]?.hooks[]? | select(.type == "command" and .command == $cmd)] | length) > 0

@@ -3695,7 +3695,7 @@ EOF
   ' "$settings_local" >/dev/null
 }
 
-test_44bk_claude_launcher_preserves_cross_project_stop_hook_entry() {
+test_44bk_claude_launcher_strips_cross_project_stop_hook_entry() {
   local d mockbin args_file home_dir settings_local current_cmd other_cmd
   d="$(new_test_dir 44bk)"
   mockbin="$d/mock-bin"
@@ -3714,9 +3714,8 @@ EOF
 
   run_local_claude_launcher "$d" "$home_dir" "$mockbin" "$args_file" || return 1
 
-  jq -e --arg other_cmd "$other_cmd" --arg cmd "$current_cmd" '
-    ([.hooks.Stop[]?.hooks[]? | select(.type=="command") | .command] | sort) == ([$other_cmd, $cmd] | sort)
-  ' "$settings_local" >/dev/null
+  [[ "$(jq '[.hooks.Stop[]?.hooks[]? | select(.type=="command") | .command] | length' "$settings_local")" == "1" ]] || return 1
+  jq -e --arg cmd "$current_cmd" '[.hooks.Stop[]?.hooks[]? | select(.type=="command") | .command] == [$cmd]' "$settings_local" >/dev/null
 }
 
 test_44bl_claude_launcher_stop_hook_entry_is_idempotent() {
@@ -3759,6 +3758,53 @@ test_44bm_claude_launcher_creates_missing_settings_local_with_current_entry() {
 
   [[ -f "$settings_local" ]] || return 1
   jq -e --arg cmd "$current_cmd" '[.hooks.Stop[]?.hooks[]? | select(.type=="command") | .command] == [$cmd]' "$settings_local" >/dev/null
+}
+
+test_44bn_claude_launcher_strips_stale_project_local_stop_hook_entry() {
+  local d mockbin args_file home_dir settings_local current_cmd stale_cmd
+  d="$(new_test_dir 44bn)"
+  mockbin="$d/mock-bin"
+  args_file="$d/bx-args.txt"
+  home_dir="$d/host-home"
+  settings_local="$d/.claude/settings.local.json"
+  current_cmd="$d/.zcrew/lib/stop-hook.sh"
+  stale_cmd="/old/proj/.zcrew/lib/stop-hook.sh"
+
+  seed_local_lib_fixture "$d"
+  make_mock_bx "$mockbin" "$args_file"
+  mkdir -p "$d/.claude" "$home_dir"
+  cat > "$settings_local" <<EOF
+{"hooks":{"Stop":[{"matcher":"*","hooks":[{"type":"command","command":"$stale_cmd"}]}]}}
+EOF
+
+  run_local_claude_launcher "$d" "$home_dir" "$mockbin" "$args_file" || return 1
+
+  [[ "$(jq '[.hooks.Stop[]?.hooks[]? | select(.type=="command") | .command] | length' "$settings_local")" == "1" ]] || return 1
+  jq -e --arg cmd "$current_cmd" '[.hooks.Stop[]?.hooks[]? | select(.type=="command") | .command] == [$cmd]' "$settings_local" >/dev/null
+}
+
+test_44bo_claude_launcher_preserves_compound_command_containing_stop_hook_path() {
+  local d mockbin args_file home_dir settings_local current_cmd compound_cmd
+  d="$(new_test_dir 44bo)"
+  mockbin="$d/mock-bin"
+  args_file="$d/bx-args.txt"
+  home_dir="$d/host-home"
+  settings_local="$d/.claude/settings.local.json"
+  current_cmd="$d/.zcrew/lib/stop-hook.sh"
+  compound_cmd='/some/.zcrew/lib/stop-hook.sh && notify-send done'
+
+  seed_local_lib_fixture "$d"
+  make_mock_bx "$mockbin" "$args_file"
+  mkdir -p "$d/.claude" "$home_dir"
+  cat > "$settings_local" <<EOF
+{"hooks":{"Stop":[{"matcher":"*","hooks":[{"type":"command","command":"$compound_cmd"}]}]}}
+EOF
+
+  run_local_claude_launcher "$d" "$home_dir" "$mockbin" "$args_file" || return 1
+
+  jq -e --arg compound_cmd "$compound_cmd" --arg cmd "$current_cmd" '
+    ([.hooks.Stop[]?.hooks[]? | select(.type=="command") | .command] | sort) == ([$compound_cmd, $cmd] | sort)
+  ' "$settings_local" >/dev/null
 }
 
 test_44c_launchers_export_ai_kind() {
@@ -5278,9 +5324,11 @@ main() {
   run_test "44b) claude launcher does not pass --mcp-config (zero MCP for worker)" test_44b_claude_launcher_drops_mcp_config
   run_test "44bi) claude launcher strips legacy global stop-hook entry" test_44bi_claude_launcher_strips_legacy_global_stop_hook_entry
   run_test "44bj) claude launcher preserves compound user stop-hook command" test_44bj_claude_launcher_preserves_compound_user_stop_hook_command
-  run_test "44bk) claude launcher preserves cross-project stop-hook entry" test_44bk_claude_launcher_preserves_cross_project_stop_hook_entry
+  run_test "44bk) claude launcher strips cross-project stop-hook entry" test_44bk_claude_launcher_strips_cross_project_stop_hook_entry
   run_test "44bl) claude launcher stop-hook entry is idempotent" test_44bl_claude_launcher_stop_hook_entry_is_idempotent
   run_test "44bm) claude launcher creates missing settings.local.json with current entry" test_44bm_claude_launcher_creates_missing_settings_local_with_current_entry
+  run_test "44bn) claude launcher strips stale project-local stop-hook entry after move" test_44bn_claude_launcher_strips_stale_project_local_stop_hook_entry
+  run_test "44bo) claude launcher preserves compound command containing stop-hook path" test_44bo_claude_launcher_preserves_compound_command_containing_stop_hook_path
   run_test "44c) all launchers export AI_KIND" test_44c_launchers_export_ai_kind
   run_test "45) install where src == target skips materialization without crashing" test_45_install_self_install_no_crash
   run_test "46) resolve_sender_name_readonly is pure and returns empty for unmapped panes" test_46_resolve_sender_name_readonly_is_pure
