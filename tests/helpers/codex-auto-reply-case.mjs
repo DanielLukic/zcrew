@@ -181,6 +181,22 @@ const scripts = {
       sock.serverSend({ jsonrpc: '2.0', method: 'turn/completed', params: { threadId: 'th1', turn: { id: 'tu1' } } });
     },
   },
+  reply_failure_loop_guard: {
+    loadedThreads: ['th1'],
+    onThreadRead: () => ({
+      thread: { turns: [{ id: 'tu1', status: { type: 'completed' }, items: [{ type: 'agentMessage', text: 'fail me' }] }] },
+    }),
+    afterFirstResume: (sock) => {
+      sock.serverSend({ jsonrpc: '2.0', method: 'turn/started', params: { threadId: 'th1', turn: { id: 'tu1' } } });
+      sock.serverSend({ jsonrpc: '2.0', method: 'turn/completed', params: { threadId: 'th1', turn: { id: 'tu1' } } });
+    },
+    onTurnStart: () => ({ turn: { id: 'tu2' } }),
+    afterTurnStart: (sock) => {
+      sock.serverSend({ jsonrpc: '2.0', method: 'turn/started', params: { threadId: 'th1', turn: { id: 'tu2' } } });
+      sock.serverSend({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'th1', turnId: 'tu2', item: { type: 'agentMessage', text: 'steer response' } } });
+      sock.serverSend({ jsonrpc: '2.0', method: 'turn/completed', params: { threadId: 'th1', turn: { id: 'tu2' } } });
+    },
+  },
 };
 
 const script = scripts[caseName];
@@ -242,6 +258,14 @@ class FakeWsServer {
       setImmediate(() => {
         sock.serverSend({ jsonrpc: '2.0', id: msg.id, result: script.onThreadRead?.() || { thread: { turns: [] } } });
         script.afterThreadRead?.(sock);
+      });
+      return;
+    }
+    if (msg.method === 'turn/start') {
+      setImmediate(() => {
+        const result = script.onTurnStart?.(sock, msg.params) || { turn: { id: 'tu_steer' } };
+        sock.serverSend({ jsonrpc: '2.0', id: msg.id, result });
+        setTimeout(() => script.afterTurnStart?.(sock, msg.params), 30);
       });
       return;
     }

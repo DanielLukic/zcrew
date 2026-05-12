@@ -5144,6 +5144,11 @@ test_91b_codex_adapter_surfaces_reply_failures() {
   # runZcrewReply now returns { ok, error } struct instead of plain boolean
   grep -Fq 'return { ok: true }' "$src" || return 1
   grep -Fq 'return { ok: false, error:' "$src" || return 1
+  # loop guard: turn/start result captured and added to notifiedTurns proactively
+  grep -Fq 'result?.turn?.id' "$src" || return 1
+  grep -Fq 'notifiedTurns.add(keyFor(threadId, newTurnId))' "$src" || return 1
+  # loop guard: steer-triggered turns are skipped for reply
+  grep -Fq 'notifiedTurns.has(key) || sentTurns.has(key)' "$src" || return 1
 }
 
 test_92_install_codex_and_pi_seeding_is_idempotent() {

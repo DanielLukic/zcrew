@@ -117,16 +117,20 @@ async function runZcrewReply(text) {
   }
 }
 
-async function notifyAgentOfFailure(rpc, threadId, errorMsg) {
+async function notifyAgentOfFailure(rpc, threadId, errorMsg, notifiedTurns, keyFor) {
   const steerText =
     'ADAPTER ERROR: zcrew failed to deliver this turn\'s reply (' +
     errorMsg +
     '). Please attempt to inform the user, retry, or escalate.';
   try {
-    await rpc.request('turn/start', {
+    const result = await rpc.request('turn/start', {
       threadId,
       input: [{ type: 'text', text: steerText }],
     });
+    const newTurnId = result?.turn?.id;
+    if (newTurnId) {
+      notifiedTurns.add(keyFor(threadId, newTurnId));
+    }
   } catch (notifyErr) {
     log(`notifyAgentOfFailure failed: ${notifyErr?.message || notifyErr}`);
   }
@@ -254,7 +258,7 @@ async function main() {
         if (!turn?.id) return;
 
         const key = keyFor(threadId, turn.id);
-        if (sentTurns.has(key) || pendingTurns.has(key)) return;
+        if (notifiedTurns.has(key) || sentTurns.has(key) || pendingTurns.has(key)) return;
 
         const fallback = lastNonEmptyAgentMessageForTurn(read, turn.id);
         if (!fallback.trim()) {
@@ -268,8 +272,7 @@ async function main() {
         if (ok) {
           sentTurns.add(key); saveRepliedKeys(sentTurns);
         } else if (!notifiedTurns.has(key)) {
-          notifiedTurns.add(key);
-          await notifyAgentOfFailure(rpc, threadId, error || 'unknown');
+          await notifyAgentOfFailure(rpc, threadId, error || 'unknown', notifiedTurns, keyFor);
         }
         return;
       }
@@ -284,7 +287,7 @@ async function main() {
       if (method === 'turn/completed') {
         const key = keyFor(params.threadId, params.turn.id);
         openTurns.delete(key);
-        if (sentTurns.has(key) || pendingTurns.has(key)) return;
+        if (notifiedTurns.has(key) || sentTurns.has(key) || pendingTurns.has(key)) return;
 
         const read = await rpc.request('thread/read', {
           threadId: params.threadId,
@@ -299,8 +302,7 @@ async function main() {
           if (ok) {
             sentTurns.add(key); saveRepliedKeys(sentTurns);
           } else if (!notifiedTurns.has(key)) {
-            notifiedTurns.add(key);
-            await notifyAgentOfFailure(rpc, params.threadId, error || 'unknown');
+            await notifyAgentOfFailure(rpc, params.threadId, error || 'unknown', notifiedTurns, keyFor);
           }
         } else {
           log(`no non-empty agentMessage for ${key}`);

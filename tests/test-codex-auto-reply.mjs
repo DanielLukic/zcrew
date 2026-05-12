@@ -154,4 +154,24 @@ await runCaseClean({ caseName: 'multi_item_turn_completed', expectedCalls: ['rep
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 
+// reply failure loop guard: steer-triggered turn does NOT trigger another notify
+{
+  const { tmp, stateDir } = await runCase({
+    caseName: 'reply_failure_loop_guard',
+    expectedCalls: ['reply fail me'],
+    expectedExit: 0,
+    zcrewFail: true,
+    settleMs: 300,
+    expectedRpcMethods: ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume', 'thread/read', 'turn/start'],
+  });
+  const rpcCalls = readRpcCalls(path.join(tmp, 'rpc-calls.txt'));
+  const turnStarts = rpcCalls.filter((c) => c.method === 'turn/start');
+  assert.equal(turnStarts.length, 1, `expected exactly 1 turn/start, got ${turnStarts.length}`);
+  const threadReads = rpcCalls.filter((c) => c.method === 'thread/read');
+  assert.equal(threadReads.length, 1, `expected exactly 1 thread/read, got ${threadReads.length}`);
+  const repliedFile = path.join(stateDir, 'replied.json');
+  assert.ok(!fs.existsSync(repliedFile), 'replied.json should NOT be written on failed reply');
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
+
 console.log('ok');
