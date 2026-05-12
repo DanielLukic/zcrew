@@ -85,5 +85,27 @@ fi
 
 [[ -n "$assistant_text" ]] || exit 0
 cd "$project_dir" || exit 0
-"$zcrew_bin" reply "$assistant_text" >/dev/null 2>&1 || true
+
+zcrew_err=""
+zcrew_rc=0
+zcrew_err="$("$zcrew_bin" reply "$assistant_text" 2>&1 >/dev/null)" || zcrew_rc=$?
+
+if [[ $zcrew_rc -eq 0 ]]; then
+  exit 0
+fi
+
+# Sanitize stderr for embedding in JSON reason
+sanitized="${zcrew_err//[^[:print:][:space:]]/}"
+sanitized="$(printf '%s' "$sanitized" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+[[ ${#sanitized} -gt 500 ]] && sanitized="${sanitized:0:497}..."
+
+stop_hook_active="$(jq -r '.stop_hook_active // false' <<<"$hook_input" 2>/dev/null || true)"
+if [[ "$stop_hook_active" == "true" ]]; then
+  printf 'zcrew stop-hook: still failing after retry — giving up to prevent loop: %s\n' "$sanitized" >&2
+  exit 0
+fi
+
+reason="ADAPTER ERROR: zcrew failed to deliver this turn's reply (${sanitized:-unknown}). Please attempt to inform the user, retry the action that requires the reply, or escalate."
+printf 'zcrew stop-hook: reply failed, asking claude to handle: %s\n' "$sanitized" >&2
+jq -nc --arg reason "$reason" '{decision:"block", reason:$reason}'
 exit 0

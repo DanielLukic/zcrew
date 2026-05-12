@@ -5151,6 +5151,135 @@ test_91b_codex_adapter_surfaces_reply_failures() {
   grep -Fq 'notifiedTurns.has(key) || sentTurns.has(key)' "$src" || return 1
 }
 
+test_91c_stop_hook_success_exits_silently() {
+  local d hook_input stdout rc fake_zcrew
+  d="$(new_test_dir 91c)"
+  hook_input='{"last_assistant_message":"hello"}'
+  mkdir -p "$d"
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  seed_local_lib_fixture "$d"
+  cat > "$d/.zcrew/lib/tell" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$d/.zcrew/lib/tell"
+  fake_zcrew="$d/fake-zcrew"
+  cat > "$fake_zcrew" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1" == "reply" ]]; then
+  shift
+  exec "$d/.zcrew/lib/tell" reply "\$@"
+fi
+exec "$ZCREW_BIN" "\$@"
+EOF
+  chmod +x "$fake_zcrew"
+
+  stdout="$(printf '%s\n' "$hook_input" | env -u BX_INSIDE BX_INSIDE=1 ZCREW_BIN="$fake_zcrew" \
+    "$d/.zcrew/lib/stop-hook.sh")"
+  rc=$?
+  [[ $rc -eq 0 ]] || return 1
+  [[ -z "$stdout" ]] || return 1
+}
+
+test_91d_stop_hook_failure_emits_block_json() {
+  local d hook_input stdout rc fake_zcrew
+  d="$(new_test_dir 91d)"
+  hook_input='{"last_assistant_message":"hello"}'
+  mkdir -p "$d"
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  seed_local_lib_fixture "$d"
+  cat > "$d/.zcrew/lib/tell" <<'EOF'
+#!/usr/bin/env bash
+echo "boom" >&2
+exit 1
+EOF
+  chmod +x "$d/.zcrew/lib/tell"
+  fake_zcrew="$d/fake-zcrew"
+  cat > "$fake_zcrew" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1" == "reply" ]]; then
+  shift
+  exec "$d/.zcrew/lib/tell" reply "\$@"
+fi
+exec "$ZCREW_BIN" "\$@"
+EOF
+  chmod +x "$fake_zcrew"
+
+  stdout="$(printf '%s\n' "$hook_input" | env -u BX_INSIDE BX_INSIDE=1 ZCREW_BIN="$fake_zcrew" \
+    "$d/.zcrew/lib/stop-hook.sh" 2>/dev/null)"
+  rc=$?
+  [[ $rc -eq 0 ]] || return 1
+  printf '%s\n' "$stdout" | grep -Fq '"decision":"block"' || return 1
+  printf '%s\n' "$stdout" | grep -Fq '"reason"' || return 1
+  printf '%s\n' "$stdout" | grep -Fq 'ADAPTER ERROR' || return 1
+  printf '%s\n' "$stdout" | grep -Fq 'boom' || return 1
+}
+
+test_91e_stop_hook_failure_with_stop_hook_active_avoids_loop() {
+  local d hook_input stdout rc stderr fake_zcrew
+  d="$(new_test_dir 91e)"
+  hook_input='{"last_assistant_message":"hello","stop_hook_active":true}'
+  mkdir -p "$d"
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  seed_local_lib_fixture "$d"
+  cat > "$d/.zcrew/lib/tell" <<'EOF'
+#!/usr/bin/env bash
+echo "boom" >&2
+exit 1
+EOF
+  chmod +x "$d/.zcrew/lib/tell"
+  fake_zcrew="$d/fake-zcrew"
+  cat > "$fake_zcrew" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1" == "reply" ]]; then
+  shift
+  exec "$d/.zcrew/lib/tell" reply "\$@"
+fi
+exec "$ZCREW_BIN" "\$@"
+EOF
+  chmod +x "$fake_zcrew"
+
+  stderr="$(printf '%s\n' "$hook_input" | env -u BX_INSIDE BX_INSIDE=1 ZCREW_BIN="$fake_zcrew" \
+    "$d/.zcrew/lib/stop-hook.sh" 2>&1 >/dev/null)"
+  rc=$?
+  [[ $rc -eq 0 ]] || return 1
+  printf '%s\n' "$stderr" | grep -Fq 'giving up to prevent loop' || return 1
+}
+
+test_91f_stop_hook_block_json_is_valid() {
+  local d hook_input stdout rc fake_zcrew
+  d="$(new_test_dir 91f)"
+  hook_input='{"last_assistant_message":"hello"}'
+  mkdir -p "$d"
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  seed_local_lib_fixture "$d"
+  cat > "$d/.zcrew/lib/tell" <<'EOF'
+#!/usr/bin/env bash
+echo "fail msg" >&2
+exit 1
+EOF
+  chmod +x "$d/.zcrew/lib/tell"
+  fake_zcrew="$d/fake-zcrew"
+  cat > "$fake_zcrew" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1" == "reply" ]]; then
+  shift
+  exec "$d/.zcrew/lib/tell" reply "\$@"
+fi
+exec "$ZCREW_BIN" "\$@"
+EOF
+  chmod +x "$fake_zcrew"
+
+  stdout="$(printf '%s\n' "$hook_input" | env -u BX_INSIDE BX_INSIDE=1 ZCREW_BIN="$fake_zcrew" \
+    "$d/.zcrew/lib/stop-hook.sh" 2>/dev/null)"
+  rc=$?
+  [[ $rc -eq 0 ]] || return 1
+  printf '%s\n' "$stdout" | jq -e . >/dev/null 2>&1 || return 1
+  local reason
+  reason="$(printf '%s\n' "$stdout" | jq -r '.reason')"
+  [[ -n "$reason" ]] || return 1
+}
+
 test_92_install_codex_and_pi_seeding_is_idempotent() {
   local d before_codex after_codex before_pi after_pi
   d="$(new_test_dir 92)"
@@ -5533,6 +5662,10 @@ main() {
   run_test "91) install seeds .pi/extensions/zcrew.ts symlink" test_91_install_seeds_pi_extension_symlink
   run_test "91a) pi extension surfaces reply failures via steer + notify" test_91a_pi_extension_surfaces_reply_failures
   run_test "91b) codex adapter surfaces reply failures via turn/start steer" test_91b_codex_adapter_surfaces_reply_failures
+  run_test "91c) stop-hook success exits silently (no stdout JSON)" test_91c_stop_hook_success_exits_silently
+  run_test "91d) stop-hook failure emits decision:block JSON" test_91d_stop_hook_failure_emits_block_json
+  run_test "91e) stop-hook with stop_hook_active true avoids loop" test_91e_stop_hook_failure_with_stop_hook_active_avoids_loop
+  run_test "91f) stop-hook block JSON is valid and has non-empty reason" test_91f_stop_hook_block_json_is_valid
   run_test "92) install codex/pi seeding is idempotent" test_92_install_codex_and_pi_seeding_is_idempotent
   run_test "93) install codex config preserves other MCP servers" test_93_install_codex_config_preserves_other_mcp_servers
   run_test "94) install codex config preserves unrelated keys" test_94_install_codex_config_preserves_unrelated_keys
