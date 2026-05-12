@@ -1411,6 +1411,110 @@ print_install_plan() {
   print_plan_section "SKIP" "${PLAN_SKIP[@]}"
 }
 
+# Return 0 if no stale paths, 1 if any stale .zcrew/{bin,lib} paths found.
+print_stale_paths() {
+  local target_abs="$1"
+  local zcrew_prefix="$target_abs/.zcrew"
+  local found_stale=false
+  local -a stale_entries=()
+
+  is_stale_zcrew_path() {
+    local path="$1"
+    [[ "$path" =~ ^.*/\.zcrew/(bin|lib)(/|$) ]] || return 1
+    local prefix="${path%/.zcrew/*}/.zcrew"
+    [[ "$prefix" != "$zcrew_prefix" ]]
+  }
+
+  # 1. .mcp.json
+  if [[ -f "$target_abs/.mcp.json" ]]; then
+    local mcp_path=""
+    mcp_path="$(jq -r '.mcpServers.zcrew.args[0] // empty' "$target_abs/.mcp.json" 2>/dev/null || true)"
+    if [[ -n "$mcp_path" ]] && is_stale_zcrew_path "$mcp_path"; then
+      stale_entries+=("  .mcp.json")
+      stale_entries+=("    mcpServers.zcrew.args[0] = $mcp_path")
+      found_stale=true
+    fi
+  fi
+
+  # 2. .codex/config.toml
+  if [[ -f "$target_abs/.codex/config.toml" ]]; then
+    local codex_path=""
+    codex_path="$(awk '/^\[mcp_servers\.zcrew\]/ { in_block=1; next }
+                       /^\[/ { in_block=0 }
+                       in_block && /^args[[:space:]]*=/ {
+                         match($0, /\[.*\]/);
+                         path = substr($0, RSTART+1, RLENGTH-2);
+                         gsub(/"/, "", path);
+                         print path;
+                       }' "$target_abs/.codex/config.toml" 2>/dev/null || true)"
+    if [[ -n "$codex_path" ]] && is_stale_zcrew_path "$codex_path"; then
+      stale_entries+=("  .codex/config.toml")
+      stale_entries+=("    [mcp_servers.zcrew] args = $codex_path")
+      found_stale=true
+    fi
+  fi
+
+  # 3. .claude/settings.local.json
+  if [[ -f "$target_abs/.claude/settings.local.json" ]]; then
+    local -a hook_cmds=()
+    while IFS= read -r cmd; do
+      [[ -n "$cmd" ]] || continue
+      if is_stale_zcrew_path "$cmd"; then
+        hook_cmds+=("$cmd")
+      fi
+    done < <(jq -r '.hooks.Stop[]?.hooks[]? | select(.type == "command") | .command' "$target_abs/.claude/settings.local.json" 2>/dev/null || true)
+    if [[ "${#hook_cmds[@]}" -gt 0 ]]; then
+      stale_entries+=("  .claude/settings.local.json")
+      local hcmd
+      for hcmd in "${hook_cmds[@]}"; do
+        stale_entries+=("    hooks.Stop[].hooks[].command = $hcmd")
+      done
+      found_stale=true
+    fi
+  fi
+
+  # 4. .bx/mounts (managed block only)
+  if [[ -f "$target_abs/.bx/mounts" ]]; then
+    local -a mount_paths=()
+    local in_managed=false line src_path
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      if [[ "$line" == '# zcrew-managed begin' ]]; then
+        in_managed=true
+        continue
+      fi
+      if [[ "$line" == '# zcrew-managed end' ]]; then
+        in_managed=false
+        continue
+      fi
+      if [[ "$in_managed" == "true" && ! "$line" =~ ^# ]]; then
+        src_path="${line%% *}"
+        if is_stale_zcrew_path "$src_path"; then
+          mount_paths+=("$src_path")
+        fi
+      fi
+    done < "$target_abs/.bx/mounts"
+    if [[ "${#mount_paths[@]}" -gt 0 ]]; then
+      stale_entries+=("  .bx/mounts")
+      local mp
+      for mp in "${mount_paths[@]}"; do
+        stale_entries+=("    managed mount source = $mp")
+      done
+      found_stale=true
+    fi
+  fi
+
+  if [[ "$found_stale" == "true" ]]; then
+    printf 'STALE PATHS DETECTED (re-run `zcrew install .` to fix):\n'
+    local entry
+    for entry in "${stale_entries[@]}"; do
+      printf '%s\n' "$entry"
+    done
+    return 1
+  fi
+
+  return 0
+}
+
 cmd_install() {
   CURRENT_SUBCMD="install"
   local target=""
@@ -1460,7 +1564,8 @@ cmd_install() {
   src_abs=$(realpath "$src")
   if [[ "$dry_run" == "true" ]]; then
     print_install_plan "$src" "$target" "$target_abs"
-    return 0
+    print_stale_paths "$target_abs"
+    return
   fi
   if [[ "$src_abs" == "$target_abs" ]]; then
     echo "==> source == target ($target_abs); skipping materialization, running bootstrap only"

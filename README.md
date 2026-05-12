@@ -37,6 +37,7 @@ cd /path/to/your/project
 ```
 
 This copies `.zcrew/bin/zcrew`, `.zcrew/bin/bx`, `.zcrew/lib/launchers/`, the canonical cross-tool zcrew skill, tool-specific helper skills, root agent docs, sandbox config, and a managed mise floor into your project. Re-run to update. Use `--dry-run` to preview what an install would do without mutating any files.
+If you move a project directory, re-run `zcrew install .` to refresh absolute paths embedded in `.mcp.json`, `.codex/config.toml`, `.claude/settings.local.json`, and `.bx/mounts`; `--dry-run` will tell you when stale paths are present.
 After running `zcrew install .` in an existing project, restart your claude orchestrator session so it reloads `.mcp.json`.
 
 ### Contributing — git hooks

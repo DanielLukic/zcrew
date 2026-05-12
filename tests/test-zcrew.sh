@@ -2348,6 +2348,77 @@ test_18t_dryrun_path_owned_premarker_lib_file_is_replace_not_skip() {
   ! printf '%s\n' "$skip" | grep -Fq '.zcrew/lib/mcp_server.py'
 }
 
+test_18u_dryrun_no_stale_paths_exit_zero() {
+  local d out
+  d="$(new_test_dir 18u)"
+  mkdir -p "$d"
+  out="$(dryrun_install_cmd "$TEST_ROOT" "$d" --dry-run 2>&1)"
+  [[ $? -eq 0 ]] || return 1
+  ! printf '%s\n' "$out" | grep -Fq 'STALE PATHS'
+}
+
+test_18v_dryrun_stale_mcp_json_reported_exit_one() {
+  local d out rc
+  d="$(new_test_dir 18v)"
+  mkdir -p "$d/.zcrew/lib"
+  cat > "$d/.mcp.json" <<EOF
+{"mcpServers":{"zcrew":{"command":"python3","args":["/old/proj/.zcrew/lib/mcp_server.py"]}}}
+EOF
+  out="$(dryrun_install_cmd "$TEST_ROOT" "$d" --dry-run 2>&1)"; rc=$?
+  [[ "$rc" -eq 1 ]] || return 1
+  printf '%s\n' "$out" | grep -Fq 'STALE PATHS DETECTED' || return 1
+  printf '%s\n' "$out" | grep -Fq '.mcp.json' || return 1
+  printf '%s\n' "$out" | grep -Fq '/old/proj/.zcrew/lib/mcp_server.py' || return 1
+}
+
+test_18w_dryrun_stale_claude_settings_reported_exit_one() {
+  local d out rc
+  d="$(new_test_dir 18w)"
+  mkdir -p "$d/.claude"
+  cat > "$d/.claude/settings.local.json" <<EOF
+{"hooks":{"Stop":[{"matcher":"*","hooks":[{"type":"command","command":"/old/proj/.zcrew/lib/stop-hook.sh"}]}]}}
+EOF
+  out="$(dryrun_install_cmd "$TEST_ROOT" "$d" --dry-run 2>&1)"; rc=$?
+  [[ "$rc" -eq 1 ]] || return 1
+  printf '%s\n' "$out" | grep -Fq 'STALE PATHS DETECTED' || return 1
+  printf '%s\n' "$out" | grep -Fq '.claude/settings.local.json' || return 1
+  printf '%s\n' "$out" | grep -Fq '/old/proj/.zcrew/lib/stop-hook.sh' || return 1
+}
+
+test_18x_dryrun_stale_bx_mounts_reported_exit_one() {
+  local d out rc
+  d="$(new_test_dir 18x)"
+  mkdir -p "$d/.bx"
+  cat > "$d/.bx/mounts" <<'EOF'
+# zcrew-managed begin
+/old/proj/.zcrew/bin /work/.zcrew/bin ro
+/old/proj/.zcrew/lib /work/.zcrew/lib ro
+# zcrew-managed end
+EOF
+  out="$(dryrun_install_cmd "$TEST_ROOT" "$d" --dry-run 2>&1)"; rc=$?
+  [[ "$rc" -eq 1 ]] || return 1
+  printf '%s\n' "$out" | grep -Fq 'STALE PATHS DETECTED' || return 1
+  printf '%s\n' "$out" | grep -Fq '.bx/mounts' || return 1
+  printf '%s\n' "$out" | grep -Fq '/old/proj/.zcrew/bin' || return 1
+}
+
+test_18y_dryrun_mixed_clean_and_stale_reports_only_stale() {
+  local d out rc
+  d="$(new_test_dir 18y)"
+  mkdir -p "$d/.claude"
+  # clean .mcp.json (no stale path — no zcrew server at all)
+  printf '{"mcpServers":{}}\n' > "$d/.mcp.json"
+  # stale claude settings
+  cat > "$d/.claude/settings.local.json" <<EOF
+{"hooks":{"Stop":[{"matcher":"*","hooks":[{"type":"command","command":"/old/proj/.zcrew/lib/stop-hook.sh"}]}]}}
+EOF
+  out="$(dryrun_install_cmd "$TEST_ROOT" "$d" --dry-run 2>&1)"; rc=$?
+  [[ "$rc" -eq 1 ]] || return 1
+  printf '%s\n' "$out" | grep -Fq 'STALE PATHS DETECTED' || return 1
+  printf '%s\n' "$out" | grep -Fq '.claude/settings.local.json' || return 1
+  ! printf '%s\n' "$out" | grep -Fxq '  .mcp.json'
+}
+
 test_19_resolve_project_dir_from_root_uses_local_state() {
   local d out
   d="$(new_test_dir 19-project)"
@@ -5256,6 +5327,11 @@ main() {
   run_test "18r) dry-run distinguishes pristine vs modified managed files" test_18r_dryrun_classifies_pristine_vs_modified
   run_test "18s) dry-run classifies absent managed files as create" test_18s_dryrun_classifies_absent_as_create
   run_test "18t) dry-run treats pre-marker lib files as replace on zcrew-owned paths" test_18t_dryrun_path_owned_premarker_lib_file_is_replace_not_skip
+  run_test "18u) dry-run with clean install has no stale paths and exits 0" test_18u_dryrun_no_stale_paths_exit_zero
+  run_test "18v) dry-run reports stale .mcp.json and exits 1" test_18v_dryrun_stale_mcp_json_reported_exit_one
+  run_test "18w) dry-run reports stale .claude/settings.local.json and exits 1" test_18w_dryrun_stale_claude_settings_reported_exit_one
+  run_test "18x) dry-run reports stale .bx/mounts and exits 1" test_18x_dryrun_stale_bx_mounts_reported_exit_one
+  run_test "18y) dry-run mixed clean+stale reports only stale and exits 1" test_18y_dryrun_mixed_clean_and_stale_reports_only_stale
   run_test "19) resolve_project_dir uses state from project root" test_19_resolve_project_dir_from_root_uses_local_state
   run_test "20) resolve_project_dir walks up from subdir" test_20_resolve_project_dir_walks_up_from_subdir
   run_test "20b) resolve_project_dir fails outside zcrew tree" test_20b_resolve_project_dir_fails_outside_zcrew_tree
