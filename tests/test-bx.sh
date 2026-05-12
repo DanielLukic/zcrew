@@ -599,6 +599,21 @@ test_23_symlinked_standard_mount_resolves_target() {
     ' "$args_file"
 }
 
+test_24_run_unsets_zcrew_project_dir() {
+    local p out
+    p="$(new_project_dir test24)"
+    bx_cmd "$p" init >/dev/null 2>&1 || return 1
+
+    out="$(
+        bx_cmd_env "$p" \
+            "ZCREW_PROJECT_DIR=/some/host/path" \
+            -- run env
+    )" || return 1
+
+    ! printf '%s\n' "$out" | grep -q '^ZCREW_PROJECT_DIR='
+}
+
+
 main() {
     mkdir -p "$BASE_PROJECT_ROOT"
     prepare_host_home
@@ -631,6 +646,7 @@ main() {
     run_test "21) bx run scrubs selected env vars and preserves API keys" test_21_run_scrubs_selected_env_and_preserves_api_keys
     run_test "22) key sandbox tools still resolve inside bx" test_22_sandbox_tools_still_resolve
     run_test "23) symlinked standard mount resolves target before bind" test_23_symlinked_standard_mount_resolves_target
+    run_test "24) bx run unsets ZCREW_PROJECT_DIR from host env" test_24_run_unsets_zcrew_project_dir
 
     echo ""
     echo "Total: $PASS_COUNT PASS, $FAIL_COUNT FAIL"

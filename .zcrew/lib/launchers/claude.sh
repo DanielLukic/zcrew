@@ -10,6 +10,8 @@
 set -euo pipefail
 export AI_KIND=claude
 project_dir="$PWD"
+launcher_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+lib_dir="$(dirname "$launcher_dir")"
 [[ -d "$project_dir/bin" ]] && export PATH="$project_dir/bin:$PATH"
 cd "$project_dir"
 if [[ -d .bx/home ]] && [[ ! -f .bx/home/.claude/settings.json ]]; then
@@ -24,7 +26,7 @@ if command -v jq >/dev/null 2>&1; then
   settings_local="$project_dir/.claude/settings.local.json"
   mkdir -p "$(dirname "$settings_local")"
   [[ -f "$settings_local" ]] || printf '{}\n' > "$settings_local"
-  stop_hook_cmd="$project_dir/.zcrew/lib/stop-hook.sh"
+  stop_hook_cmd="$lib_dir/stop-hook.sh"
   settings_tmp="$settings_local.tmp.$$"
   if jq --arg cmd "$stop_hook_cmd" '
     .hooks = (.hooks // {})

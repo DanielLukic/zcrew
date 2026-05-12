@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7,7 +7,28 @@ import fs from 'node:fs';
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ZCREW_BIN = process.env.ZCREW_BIN || path.resolve(__dirname, '../bin/zcrew');
+function resolveZcrewBin() {
+  const isExecutableFile = (p) => {
+    try {
+      return fs.statSync(p).isFile() && (fs.accessSync(p, fs.constants.X_OK), true);
+    } catch {
+      return false;
+    }
+  };
+  const override = process.env.ZCREW_BIN;
+  if (override) {
+    if (isExecutableFile(override)) return fs.realpathSync(override);
+    throw new Error(`ZCREW_BIN is set but not executable: ${override}`);
+  }
+  const sibling = path.resolve(__dirname, '../bin/zcrew');
+  if (isExecutableFile(sibling)) return fs.realpathSync(sibling);
+  try {
+    const found = execFileSync('bash', ['-lc', 'command -v zcrew'], { encoding: 'utf8' }).trim();
+    if (found && isExecutableFile(found)) return fs.realpathSync(found);
+  } catch {}
+  throw new Error('zcrew binary not found (checked ZCREW_BIN, local ../bin/zcrew, and PATH)');
+}
+const ZCREW_BIN = resolveZcrewBin();
 const WS_URL = process.env.ZCREW_CODEX_WS_URL || '';
 const STATE_DIR = process.env.ZCREW_CODEX_STATE_DIR || '';
 const REPLIED_FILE = STATE_DIR ? path.join(STATE_DIR, 'replied.json') : '';
@@ -176,7 +197,7 @@ async function main() {
     if (inFlight) return inFlight;
 
     const promise = rpc
-      .request('thread/resume', { threadId, excludeTurns: true })
+      .request('thread/resume', { threadId })
       .then(() => {
         subscribedThreads.add(threadId);
         return true;
@@ -287,7 +308,6 @@ async function main() {
   await rpc.connect();
   await rpc.request('initialize', {
     clientInfo: { name: 'zcrew-codex-auto-reply', title: 'zcrew-codex-auto-reply', version: '0.1.0' },
-    capabilities: { experimentalApi: true },
   });
   rpc.notify('initialized', {});
 

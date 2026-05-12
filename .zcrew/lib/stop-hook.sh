@@ -8,7 +8,14 @@ hook_input="$(cat 2>/dev/null || true)"
 
 [[ -n "${BX_INSIDE:-}" ]] || exit 0
 
-project_dir="${CLAUDE_PROJECT_DIR:-}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+project_dir=""
+if [[ "$script_dir" == */.zcrew/lib ]]; then
+  project_dir="${script_dir%/.zcrew/lib}"
+fi
+if [[ -z "$project_dir" || ! -d "$project_dir/.zcrew" ]]; then
+  project_dir="${CLAUDE_PROJECT_DIR:-}"
+fi
 if [[ -z "$project_dir" || ! -d "$project_dir/.zcrew" ]]; then
   dir="$PWD"
   while true; do
@@ -23,12 +30,33 @@ fi
 [[ -n "$project_dir" && -d "$project_dir/.zcrew" ]] || exit 0
 
 zcrew_bin="${ZCREW_BIN:-}"
-if [[ -z "$zcrew_bin" || ! -x "$zcrew_bin" ]]; then
+resolve_zcrew_bin() {
+  local override="${ZCREW_BIN:-}"
+  local self real_self sibling found
+  if [[ -n "$override" ]]; then
+    [[ -x "$override" ]] || return 1
+    printf '%s\n' "$(realpath "$override")"
+    return 0
+  fi
   self="${BASH_SOURCE[0]}"
   real_self="$(cd "$(dirname "$self")" && pwd)/$(basename "$self")"
-  zcrew_bin="$(cd "$(dirname "$real_self")" && pwd)/../bin/zcrew"
-fi
-[[ -x "$zcrew_bin" ]] || exit 0
+  sibling="$(cd "$(dirname "$real_self")" && pwd)/../bin/zcrew"
+  if [[ -x "$sibling" ]]; then
+    printf '%s\n' "$(realpath "$sibling")"
+    return 0
+  fi
+  found="$(command -v zcrew 2>/dev/null || true)"
+  if [[ -n "$found" && -x "$found" ]]; then
+    printf '%s\n' "$(realpath "$found")"
+    return 0
+  fi
+  return 1
+}
+
+zcrew_bin="$(resolve_zcrew_bin)" || {
+  echo "zcrew stop-hook: zcrew binary not found (checked ZCREW_BIN, local ../bin/zcrew, and PATH)" >&2
+  exit 1
+}
 
 assistant_text="$(jq -r '.last_assistant_message // empty' <<<"$hook_input" 2>/dev/null || true)"
 
@@ -56,5 +84,6 @@ if [[ -z "$assistant_text" ]]; then
 fi
 
 [[ -n "$assistant_text" ]] || exit 0
+cd "$project_dir" || exit 0
 "$zcrew_bin" reply "$assistant_text" >/dev/null 2>&1 || true
 exit 0

@@ -29,15 +29,15 @@ Each agent runs inside a bwrap sandbox (`bx`) with isolated HOME, scrubbed env v
 ```bash
 # Clone zcrew (once)
 git clone https://github.com/DanielLukic/zcrew.git ~/zcrew
+cd ~/zcrew
 
 # Install into your project
-~/zcrew/bin/zcrew install /path/to/your/project
+.zcrew/bin/zcrew install /path/to/your/project
 cd /path/to/your/project
 ```
 
-This copies `bin/zcrew`, `bin/bx`, agent launchers, the canonical cross-tool zcrew skill, tool-specific helper skills, root agent docs, sandbox config, and a managed mise floor into your project. Re-run to update.
-
-**Global install (alternative):** if you prefer zcrew available in every project without per-project install, run `./install-globals.sh --include-zcrew` from the clone. This installs `bx`/`ix` to `~/.local/bin/` and deploys zcrew skills into the global config dirs of your agents (`~/.codex/skills/`, `~/.pi/agent/skills/`). Per-project install is still recommended for full control. *(DISCLAIMER: Not properly tested/used, yet!)*
+This copies `.zcrew/bin/zcrew`, `.zcrew/bin/bx`, `.zcrew/lib/launchers/`, the canonical cross-tool zcrew skill, tool-specific helper skills, root agent docs, sandbox config, and a managed mise floor into your project. Re-run to update. Use `--dry-run` to preview what an install would do without mutating any files.
+After running `zcrew install .` in an existing project, restart your claude orchestrator session so it reloads `.mcp.json`.
 
 ## Quick start
 
@@ -59,10 +59,10 @@ Available CLI commands for manual use: `zcrew spawn`, `send`, `close`, `list`, `
 
 | Tool | Purpose |
 |------|---------|
-| `bin/zcrew` | Multi-agent orchestration CLI |
-| `bin/bx` | bwrap sandbox manager (lightweight, no container daemon) |
-| `bin/ix` | Incus container manager (heavier, full apt, persistent) |
-| `lib/zcrew/launchers/` | Per-agent launch scripts (claude.sh, codex.sh, pi.sh) |
+| `.zcrew/bin/zcrew` | Multi-agent orchestration CLI |
+| `.zcrew/bin/bx` | bwrap sandbox manager (lightweight, no container daemon) |
+| `.zcrew/bin/ix` | Incus container manager (heavier, full apt, persistent) |
+| `.zcrew/lib/launchers/` | Per-agent launch scripts (claude.sh, codex.sh, pi.sh) |
 | `.agents/skills/` | Canonical cross-tool skill location (`zcrew`) |
 | `.claude/skills/` | Claude Code slash commands (/zspawn, /zsend, etc.) |
 | `.pi/skills/` | Pi slash commands plus `zcrew` symlinked to `.agents/skills/zcrew` |
@@ -111,7 +111,7 @@ Refer to your agent's MCP documentation for the exact format.
 
 ## ix (Incus) — alternative sandbox *(DISCLAIMER: Not integrated, yet!)*
 
-`bin/ix` provides a heavier alternative to bx using Incus/LXC containers. Full apt, persistent containers, UID-mapped shared mounts. Useful when agents need to install system packages or run long-lived services. Not part of the default zcrew workflow — bx covers most use cases.
+`.zcrew/bin/ix` provides a heavier alternative to bx using Incus/LXC containers. Full apt, persistent containers, UID-mapped shared mounts. Useful when agents need to install system packages or run long-lived services. Not part of the default zcrew workflow — bx covers most use cases.
 
 ### ix prerequisites
 
@@ -143,9 +143,9 @@ Config lives in `.ix/config` per project (CONTAINER, IMAGE, WORKDIR). Optional `
 ## Tests
 
 ```bash
-bash tests/test-bx.sh      # 22 tests
-bash tests/test-ix.sh      # 16 tests
-bash tests/test-zcrew.sh   # 52+ tests
+bash tests/test-bx.sh
+bash tests/test-ix.sh
+bash tests/test-zcrew.sh   # currently 215 tests
 ```
 
 ## License

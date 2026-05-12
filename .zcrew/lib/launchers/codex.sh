@@ -6,11 +6,22 @@ set -euo pipefail
 export AI_KIND=codex
 
 project_dir="$PWD"
+launcher_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+lib_dir="$(dirname "$launcher_dir")"
 [[ -d "$project_dir/bin" ]] && export PATH="$project_dir/bin:$PATH"
 cd "$project_dir"
 
-pane_id="${ZELLIJ_PANE_ID:-$$}"
+pane_id_raw="${TMUX_PANE:-${ZELLIJ_PANE_ID:-$$}}"
+pane_id="${pane_id_raw#%}"
 state_dir="$project_dir/.zcrew/state/codex-worker/$pane_id"
+
+read_proc_starttime() {
+  local pid="$1"
+  local raw tail
+  raw="$(cat "/proc/$pid/stat" 2>/dev/null)" || return 1
+  tail="${raw##*) }"
+  awk -v t="$tail" 'BEGIN{n=split(t,a," "); if (n < 20) exit 1; print a[20]}'
+}
 
 # Keep all codex worker processes inside bx. Outer launcher re-enters itself
 # under bx; inner launcher orchestrates app-server + adapter + TUI.
@@ -18,13 +29,21 @@ if [[ "${1:-}" != "--zcrew-inner-codex-launcher" ]]; then
   mkdir -p "$state_dir"
   # Host-visible PID for killing the entire bwrap namespace from outside.
   printf '%s\n' "$$" > "$state_dir/outer.pid"
+  read_proc_starttime "$$" > "$state_dir/outer.starttime"
   exec bx run -- bash "$0" --zcrew-inner-codex-launcher
 fi
 
 # Re-assert inside the inner launcher path as an explicit invariant.
 export AI_KIND=codex
 
-session_name="${ZELLIJ_SESSION_NAME:-default}"
+if [[ -n "${ZELLIJ_SESSION_NAME:-}" ]]; then
+  session_name="$ZELLIJ_SESSION_NAME"
+elif [[ -n "${TMUX:-}" ]] && command -v tmux >/dev/null 2>&1; then
+  session_name="$(tmux display-message -p '#S' 2>/dev/null || true)"
+  [[ -n "$session_name" ]] || session_name="default"
+else
+  session_name="default"
+fi
 mkdir -p "$state_dir"
 
 app_pid_file="$state_dir/app-server.pid"
@@ -122,7 +141,7 @@ fi
 
 ZCREW_CODEX_WS_URL="$ws_url" \
 ZCREW_CODEX_STATE_DIR="$state_dir" \
-  node "$project_dir/.zcrew/lib/codex-auto-reply.mjs" >>"$adapter_log" 2>&1 &
+  node "$lib_dir/codex-auto-reply.mjs" >>"$adapter_log" 2>&1 &
 adapter_pid=$!
 printf '%s\n' "$adapter_pid" > "$adapter_pid_file"
 

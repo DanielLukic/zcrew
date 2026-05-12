@@ -7,11 +7,13 @@ Tool surface depends on BX_INSIDE at startup:
 
 All tools shell out to the existing zcrew CLI; this is a thin transport
 layer, not a reimplementation. Identity (sender pane) is resolved by
-the CLI from ZELLIJ_PANE_ID, which the agent inherits and propagates.
+the CLI from the active multiplexer environment, which the agent
+inherits and propagates.
 """
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -19,13 +21,15 @@ from pathlib import Path
 
 def inherit_env_from_parent():
     """Codex/pi spawn the MCP server with a sanitized env. The zcrew CLI
-    and zellij CLI underneath it need a handful of identity / socket-
+    and multiplexer tools underneath it need a handful of identity / socket-
     discovery variables to function; walk the parent process tree and
     copy any of these we lack."""
     needed = [
         "ZELLIJ_SESSION_NAME",
         "ZELLIJ_PANE_ID",
         "ZELLIJ",
+        "TMUX",
+        "TMUX_PANE",
         "XDG_RUNTIME_DIR",
         "XDG_DATA_HOME",
         "XDG_CONFIG_HOME",
@@ -65,9 +69,29 @@ SERVER_INFO = {"name": "zcrew", "version": "1"}
 
 WORKER = bool(os.environ.get("BX_INSIDE"))
 
-ZCREW_BIN = os.environ.get("ZCREW_BIN") or str(
-    Path(__file__).resolve().parent.parent / "bin" / "zcrew"
-)
+
+def resolve_zcrew_bin() -> str:
+    override = os.environ.get("ZCREW_BIN")
+    if override:
+        p = Path(override).expanduser()
+        if p.is_file() and os.access(p, os.X_OK):
+            return str(p.resolve())
+        raise RuntimeError(f"ZCREW_BIN is set but not executable: {p}")
+
+    local_sibling = (Path(__file__).resolve().parent.parent / "bin" / "zcrew").resolve()
+    if local_sibling.is_file() and os.access(local_sibling, os.X_OK):
+        return str(local_sibling)
+
+    found = shutil.which("zcrew")
+    if found and os.access(found, os.X_OK):
+        return str(Path(found).resolve())
+
+    raise RuntimeError(
+        "zcrew binary not found (checked ZCREW_BIN, local ../bin/zcrew, "
+        "and PATH)"
+    )
+
+ZCREW_BIN = resolve_zcrew_bin()
 
 
 def run_zcrew(args):

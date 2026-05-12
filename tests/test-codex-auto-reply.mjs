@@ -125,8 +125,8 @@ await runCaseClean({ caseName: 'multi_item_turn_completed', expectedCalls: ['rep
   const initCall = readRpcCalls(path.join(tmp, 'rpc-calls.txt')).find((entry) => entry.method === 'initialize');
   assert.deepEqual(
     initCall?.params?.capabilities,
-    { experimentalApi: true },
-    `initialize.capabilities should include experimentalApi: true, got ${JSON.stringify(initCall?.params?.capabilities)}`,
+    undefined,
+    `initialize should not include capabilities, got ${JSON.stringify(initCall?.params?.capabilities)}`,
   );
   fs.rmSync(tmp, { recursive: true, force: true });
 }

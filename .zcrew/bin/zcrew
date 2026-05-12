@@ -1,44 +1,188 @@
 #!/usr/bin/env bash
 # zcrew-managed
 set -euo pipefail
+_zcrew_primary_lib_dir="$(dirname "${BASH_SOURCE[0]}")/../lib"
+if [[ -f "$_zcrew_primary_lib_dir/multiplexer.sh" ]]; then source "$_zcrew_primary_lib_dir/multiplexer.sh"; fi
 
-find_project_root() {
-  if [[ -n "${ZCREW_PROJECT_DIR:-}" && -d "${ZCREW_PROJECT_DIR}/.zcrew" ]]; then
-    printf '%s\n' "$ZCREW_PROJECT_DIR"
-    return 0
+# Hardened PROJECT_DIR resolver — 4-rule lookup with stateful/discovery guard.
+#
+# Rules (in order):
+#   1. ZCREW_PROJECT_DIR env: validate dir exists + realpath.
+#      Ignored entirely when BX_INSIDE=1 (host paths don't translate inside sandbox).
+#   2. Walk up from PWD looking for .zcrew/.
+#      If .git is a FILE (linked worktree), redirect via
+#      git rev-parse --path-format=absolute --git-common-dir → strip /.git
+#      → main project root.
+#   3. If inside git (but no .zcrew/ found): return git common root
+#      (rev-parse --git-common-dir, strip /.git, realpath).
+#   4. PWD fallback (realpath PWD).
+#
+# ALWAYS realpath() the final result.
+#
+# Semantics:
+#   for_op=discovery (init/install/usage): return whatever rule resolves.
+#   for_op=stateful (spawn/send/claim/list/sync/register/unregister/
+#                    rename/close/reply/gc):
+#     require .zcrew/ at the resolved root. If missing, hard-error.
+#
+# Cached per process: first call sets _RESOLVED_PROJECT_DIR.
+is_zcrew_project_root() {
+  local root="$1"
+  [[ -d "$root/.zcrew" ]]
+}
+
+resolve_project_dir_from_path_if_resolvable() {
+  local start_path="${1:-}"
+  local dir=""
+  local git_dir=""
+  local git_common_dir=""
+  local main_root=""
+
+  [[ -n "$start_path" ]] || return 1
+  if [[ -d "$start_path" ]]; then
+    dir="$(realpath "$start_path" 2>/dev/null || true)"
+  elif [[ -e "$start_path" ]]; then
+    dir="$(dirname "$(realpath "$start_path")")"
+  else
+    return 1
   fi
+  [[ -n "$dir" ]] || return 1
+  git_dir="$dir"
 
-  local dir="${1:-$PWD}"
   while true; do
-    if [[ -d "$dir/.zcrew" ]]; then
+    if is_zcrew_project_root "$dir"; then
       if [[ -f "$dir/.git" ]]; then
-        local git_common_dir main_root
         git_common_dir="$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
         if [[ -n "$git_common_dir" ]]; then
           main_root="${git_common_dir%/.git}"
-          if [[ -d "$main_root/.zcrew" ]]; then
-            printf '%s\n' "$main_root"
+          if is_zcrew_project_root "$main_root"; then
+            realpath "$main_root"
             return 0
           fi
         fi
       fi
-      printf '%s\n' "$dir"
+      realpath "$dir"
       return 0
     fi
     if [[ "$dir" == "/" ]]; then
-      return 1
+      break
     fi
     dir="$(dirname "$dir")"
   done
+
+  git_common_dir="$(git -C "$git_dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+  if [[ -n "$git_common_dir" ]]; then
+    main_root="${git_common_dir%/.git}"
+    if is_zcrew_project_root "$main_root"; then
+      realpath "$main_root"
+      return 0
+    fi
+  fi
+
+  return 1
 }
 
-PROJECT_DIR="$(find_project_root "$PWD" || echo "$PWD")"
-STATE_DIR="$PROJECT_DIR/.zcrew"
-REGISTRY_FILE="$STATE_DIR/registry.json"
-LOCK_FILE="$STATE_DIR/registry.lock"
-SPAWN_DIR="$STATE_DIR/spawn"
-AUDIT_FILE="$STATE_DIR/audit.log"
-BX_DIR="$PROJECT_DIR/.bx"
+resolve_project_dir_from_pwd_if_resolvable() {
+  resolve_project_dir_from_path_if_resolvable "$PWD"
+}
+
+resolve_project_dir() {
+  local for_op="${1:-stateful}"
+
+  # Return cached result if already resolved.
+  if [[ -n "${_RESOLVED_PROJECT_DIR:-}" ]]; then
+    if [[ "$for_op" == "stateful" && ! -d "$_RESOLVED_PROJECT_DIR/.zcrew" ]]; then
+      echo "zcrew: no zcrew project here. Run \`zcrew init\` or \`zcrew install .\` to create one." >&2
+      exit 1
+    fi
+    printf '%s\n' "$_RESOLVED_PROJECT_DIR"
+    return 0
+  fi
+
+  local candidate=""
+
+  # Rule 1: ZCREW_PROJECT_DIR env — ignored inside sandbox.
+  if [[ "${BX_INSIDE:-0}" != "1" && -n "${ZCREW_PROJECT_DIR:-}" && -d "$ZCREW_PROJECT_DIR" ]]; then
+    candidate="$(realpath "$ZCREW_PROJECT_DIR")"
+    local cwd_candidate=""
+    if cwd_candidate="$(resolve_project_dir_from_pwd_if_resolvable)"; then
+      if [[ "$cwd_candidate" != "$candidate" ]]; then
+        {
+          echo "zcrew: ZCREW_PROJECT_DIR points at a different project than the current working directory."
+          echo "zcrew: env project: $candidate"
+          echo "zcrew: cwd project: $cwd_candidate"
+          echo "zcrew: hint: ZCREW_PROJECT_DIR is likely set in your shell profile or parent shell."
+        } >&2
+        exit 1
+      fi
+    fi
+  fi
+
+  # Rule 2: Walk up from PWD looking for .zcrew/.
+  if [[ -z "$candidate" ]]; then
+    candidate="$(resolve_project_dir_from_pwd_if_resolvable || true)"
+  fi
+
+  # Rule 3: Git common root (if inside a repo but no .zcrew/ found).
+  if [[ -z "$candidate" ]]; then
+    local git_common_dir
+    git_common_dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    if [[ -n "$git_common_dir" ]]; then
+      candidate="$(realpath "${git_common_dir%/.git}")"
+    fi
+  fi
+
+  # Rule 4: PWD fallback.
+  if [[ -z "$candidate" ]]; then
+    candidate="$(realpath "$PWD")"
+  fi
+
+  # Stateful guard: .zcrew/ must exist at the resolved root.
+  if [[ "$for_op" == "stateful" && ! -d "$candidate/.zcrew" ]]; then
+    echo "zcrew: no zcrew project here. Run \`zcrew init\` or \`zcrew install .\` to create one." >&2
+    exit 1
+  fi
+
+  # Cache and return.
+  _RESOLVED_PROJECT_DIR="$candidate"
+  printf '%s\n' "$candidate"
+}
+
+# Lazy: set on first call to resolve_project_dir.
+PROJECT_DIR=""
+_resolve_and_set_project_dir() {
+  local for_op="${1:-stateful}"
+  PROJECT_DIR="$(resolve_project_dir "$for_op")"
+  STATE_DIR="$PROJECT_DIR/.zcrew"
+  REGISTRY_FILE="$STATE_DIR/registry.json"
+  LOCK_FILE="$STATE_DIR/registry.lock"
+  SPAWN_DIR="$STATE_DIR/spawn"
+  AUDIT_FILE="$STATE_DIR/audit.log"
+  BX_DIR="$PROJECT_DIR/.bx"
+}
+
+
+
+
+resolve_lib_dir() {
+  local project_root="${1:-$PROJECT_DIR}"
+  if [[ -z "$project_root" ]]; then
+    project_root="$(resolve_project_dir discovery)"
+  fi
+  local project_lib="$(realpath "$project_root/.zcrew/lib")"
+  if [[ ! -d "$project_lib" ]]; then
+    echo "zcrew: no zcrew lib dir found at $project_lib" >&2
+    echo "Run .zcrew/bin/zcrew install <source> <target> to repair." >&2
+    exit 1
+  fi
+  printf '%s\n' "$project_lib"
+}
+STATE_DIR=""
+REGISTRY_FILE=""
+LOCK_FILE=""
+SPAWN_DIR=""
+AUDIT_FILE=""
+BX_DIR=""
 CURRENT_SUBCMD="main"
 ZCREW_AUTO_SYNC="${ZCREW_AUTO_SYNC:-1}"
 ZCREW_PROJECT_READY=0
@@ -66,16 +210,17 @@ logger() {
 }
 
 fail_not_initialized() {
-  echo "zcrew: no .zcrew/ found from $PWD upward — run: zcrew install ." >&2
+  echo "zcrew: no zcrew project here. Run `zcrew init` or `zcrew install .` to create one." >&2
   exit 1
 }
 
 require_project() {
+  _resolve_and_set_project_dir "stateful"
   [[ -d "$STATE_DIR" ]] || fail_not_initialized
   if [[ "$ZCREW_PROJECT_READY" != "1" ]]; then
     if [[ "$ZCREW_AUTO_SYNC" == "1" ]]; then
       logger "$CURRENT_SUBCMD" "info" "auto-sync begin"
-      reconcile_registry_with_zellij "true"
+      reconcile_registry_with_live_panes "true"
       logger "$CURRENT_SUBCMD" "info" "auto-sync end"
     fi
     ZCREW_PROJECT_READY=1
@@ -223,12 +368,16 @@ write_managed_bx_mounts() {
   [[ -d "$bx_dir" ]] || return 1
 
   local mounts_file="$bx_dir/mounts"
-  local target_abs workdir sandbox_home zellij_sock_dir tmp before after in_managed=false line
+  local target_abs workdir sandbox_home mx_sock_dir tmp before after in_managed=false line
   local pair_count=0
+  local lib_dir local_lib_abs mount_bin_src mount_lib_src mode_note
   target_abs="$(realpath "$target_dir")"
   workdir="$(resolve_bx_workdir_for_target "$target_dir")"
   sandbox_home="$(resolve_bx_sandbox_home)"
-  zellij_sock_dir="/run/user/$(id -u)/zellij"
+  mx_sock_dir="$(mx_socket_dir)"
+  mount_bin_src="$target_abs/.zcrew/bin"
+  mount_lib_src="$target_abs/.zcrew/lib"
+  mode_note="# install-mode: local (.zcrew/bin + .zcrew/lib)"
 
   mkdir -p "$bx_dir"
   [[ -f "$mounts_file" ]] || : > "$mounts_file"
@@ -277,9 +426,11 @@ write_managed_bx_mounts() {
 
   cat >> "$tmp" <<EOF
 # zcrew-managed begin
-$zellij_sock_dir $zellij_sock_dir rw
-$target_abs/.zcrew/bin $workdir/.zcrew/bin ro
-$target_abs/.zcrew/lib $workdir/.zcrew/lib ro
+# Managed by zcrew install; source paths are selected at install time.
+$mode_note
+$mx_sock_dir $mx_sock_dir rw
+$mount_bin_src $workdir/.zcrew/bin ro
+$mount_lib_src $workdir/.zcrew/lib ro
 $target_abs/.config/mise.toml $workdir/.config/mise.toml ro
 $target_abs/.bx/config $workdir/.bx/config ro
 $target_abs/.bx/mounts $workdir/.bx/mounts ro
@@ -301,22 +452,6 @@ EOF
 
 ensure_bx_managed_mounts() {
   write_managed_bx_mounts "$@"
-}
-
-# Detect a stale ZELLIJ_SESSION_NAME — happens when the user renames the
-# zellij session after claude was launched. zellij action commands hang on
-# a stale session name. Fail fast with a clear message.
-require_zellij_session() {
-  if [[ -z "${ZELLIJ_SESSION_NAME:-}" ]]; then
-    echo "zcrew: ZELLIJ_SESSION_NAME not set — not inside a zellij session." >&2
-    exit 1
-  fi
-  if ! zellij list-sessions -s 2>/dev/null | grep -qFx "$ZELLIJ_SESSION_NAME"; then
-    echo "zcrew: ZELLIJ_SESSION_NAME='$ZELLIJ_SESSION_NAME' is stale (session renamed or gone)." >&2
-    echo "       The env var was baked into this pane at creation and cannot be refreshed by restarting claude inside it." >&2
-    echo "       Open a new pane (zellij Alt+n, then start claude there) OR restart zellij entirely." >&2
-    exit 1
-  fi
 }
 
 ensure_registry_files() {
@@ -363,7 +498,7 @@ zcrew_owned_bin_files() {
 }
 
 zcrew_owned_lib_files() {
-  printf '%s\n' tell mcp_server.py pi-zcrew-ext.ts stop-hook.sh codex-auto-reply.mjs launchers/claude.sh launchers/codex.sh launchers/pi.sh
+  printf '%s\n' tell mcp_server.py multiplexer.sh pi-zcrew-ext.ts stop-hook.sh codex-auto-reply.mjs launchers/claude.sh launchers/codex.sh launchers/pi.sh
 }
 
 keep_symlink_target_for() {
@@ -372,6 +507,7 @@ keep_symlink_target_for() {
     bin/*) printf '../.zcrew/bin/%s\n' "${rel#bin/}" ;;
     lib/zcrew/tell) printf '../../.zcrew/lib/tell\n' ;;
     lib/zcrew/mcp_server.py) printf '../../.zcrew/lib/mcp_server.py\n' ;;
+    lib/zcrew/multiplexer.sh) printf '../../.zcrew/lib/multiplexer.sh\n' ;;
     lib/zcrew/pi-zcrew-ext.ts) printf '../../.zcrew/lib/pi-zcrew-ext.ts\n' ;;
     lib/zcrew/stop-hook.sh) printf '../../.zcrew/lib/stop-hook.sh\n' ;;
     lib/zcrew/codex-auto-reply.mjs) printf '../../.zcrew/lib/codex-auto-reply.mjs\n' ;;
@@ -422,10 +558,13 @@ is_zcrew_owned_file() {
       grep -q 'IX_INSIDE' "$path"
       ;;
     lib/zcrew/tell)
-      grep -q 'zellij action write 27 91 50 48 48 126' "$path"
+      grep -q '# zcrew-managed' "$path"
       ;;
     lib/zcrew/mcp_server.py)
       grep -q 'zcrew MCP server' "$path"
+      ;;
+    lib/zcrew/multiplexer.sh)
+      grep -q '^# zcrew-managed$' "$path" && grep -q '^_mx_ensure_init()' "$path"
       ;;
     lib/zcrew/pi-zcrew-ext.ts)
       grep -q 'pi-native zcrew extension' "$path"
@@ -484,7 +623,7 @@ verify_managed_layout() {
   done < <(zcrew_owned_bin_files)
   while IFS= read -r rel; do
     case "$rel" in
-      *.ts) [[ -f "$root/.zcrew/lib/$rel" ]] || return 1 ;;
+      *.ts|multiplexer.sh) [[ -r "$root/.zcrew/lib/$rel" ]] || return 1 ;;
       *)    [[ -x "$root/.zcrew/lib/$rel" ]] || return 1 ;;
     esac
   done < <(zcrew_owned_lib_files)
@@ -502,75 +641,27 @@ copy_managed_layout() {
   while IFS= read -r rel; do
     mkdir -p "$(dirname "$target_root/.zcrew/lib/$rel")"
     cp "$src_root/.zcrew/lib/$rel" "$target_root/.zcrew/lib/$rel"
-    chmod +x "$target_root/.zcrew/lib/$rel"
+    case "$rel" in
+      *.ts|multiplexer.sh) chmod 644 "$target_root/.zcrew/lib/$rel" ;;
+      *) chmod +x "$target_root/.zcrew/lib/$rel" ;;
+    esac
   done < <(zcrew_owned_lib_files)
 }
 
-has_stale_layout() {
-  local root="$1"
-  local rel
-  while IFS= read -r rel; do
-    [[ -e "$root/bin/$rel" ]] && return 0
-  done < <(zcrew_owned_bin_files)
-  while IFS= read -r rel; do
-    [[ -e "$root/lib/zcrew/$rel" ]] && return 0
-  done < <(zcrew_owned_lib_files)
-  return 1
-}
-
-remove_stale_layout() {
-  local root="$1"
-  local delete_real="${2:-false}"
-  local rel
-  while IFS= read -r rel; do
-    local path="$root/bin/$rel"
-    local rel_path="bin/$rel"
-    if [[ -L "$path" ]]; then
-      if is_keep_symlink "$path" "$root"; then
-        rm -f "$path"
-      else
-        echo "warning: leaving existing non-zcrew symlink at $rel_path" >&2
-      fi
-    elif [[ -e "$path" ]]; then
-      if [[ "$delete_real" == "true" ]] && is_zcrew_owned_file "$path" "$rel_path"; then
-        rm -f "$path"
-      else
-        echo "warning: cannot verify $rel_path is zcrew-owned; remove manually if you don't need it: rm \"$path\"" >&2
-      fi
-    fi
-  done < <(zcrew_owned_bin_files)
-  rmdir --ignore-fail-on-non-empty "$root/bin" 2>/dev/null || true
-
-  if [[ -d "$root/lib/zcrew" ]]; then
-    while IFS= read -r rel; do
-      local path="$root/lib/zcrew/$rel"
-      local rel_path="lib/zcrew/$rel"
-      if [[ -L "$path" ]]; then
-        if is_keep_symlink "$path" "$root"; then
-          rm -f "$path"
-        else
-          echo "warning: leaving existing non-zcrew symlink at $rel_path" >&2
-        fi
-      elif [[ -e "$path" ]]; then
-        if [[ "$delete_real" == "true" ]] && is_zcrew_owned_file "$path" "$rel_path"; then
-          rm -f "$path"
-        else
-          echo "warning: cannot verify $rel_path is zcrew-owned; remove manually if you don't need it: rm \"$path\"" >&2
-        fi
-      fi
-    done < <(zcrew_owned_lib_files)
-
-    local path
-    while IFS= read -r path; do
-      [[ -n "$path" ]] || continue
-      echo "warning: unexpected files under legacy lib/zcrew preserved: $path" >&2
-    done < <(cd "$root/lib/zcrew" && find . \( -type f -o -type l \) | sed 's#^\./##' | sort)
-
-    rmdir --ignore-fail-on-non-empty "$root/lib/zcrew/launchers" 2>/dev/null || true
-    rmdir --ignore-fail-on-non-empty "$root/lib/zcrew" 2>/dev/null || true
-    rmdir --ignore-fail-on-non-empty "$root/lib" 2>/dev/null || true
+detect_install_source() {
+  local self clone_src
+  self="$(readlink -f "${BASH_SOURCE[0]}")"
+  clone_src="$(dirname "$(dirname "$(dirname "$self")")")"
+  if [[ -f "$clone_src/.zcrew/bin/zcrew" && -f "$clone_src/.zcrew/lib/mcp_server.py" ]]; then
+    printf 'clone|%s|%s\n' "$self" "$clone_src"
+    return 0
   fi
+  echo "zcrew: cannot determine install source for $self" >&2
+  echo "zcrew: expected a clone checkout with .zcrew/bin/zcrew and .zcrew/lib/mcp_server.py" >&2
+  exit 1
 }
+
+
 
 write_managed_mise_floor() {
   local target_dir="$1"
@@ -607,13 +698,14 @@ registry_write_jq() {
 
 cmd_init() {
   CURRENT_SUBCMD="init"
+  _resolve_and_set_project_dir "discovery"
   mkdir -p "$SPAWN_DIR"
   : > "$LOCK_FILE"
   if [[ ! -f "$REGISTRY_FILE" ]]; then
     printf '{"version":1,"panes":{}}\n' > "$REGISTRY_FILE"
   fi
   logger "init" "info" "entry cwd=$PWD"
-  echo "Initialized .zcrew/ at $PWD"
+  echo "Initialized .zcrew/ at $PROJECT_DIR"
 }
 
 cmd_register() {
@@ -625,7 +717,8 @@ cmd_register() {
   [[ -n "$name" ]] || { echo "Usage: zcrew register <name> [--paneId X] [--sessionId Y] [--agent A] [--cwd P] [--pid N] [--status S]" >&2; exit 1; }
   shift || true
 
-  local pane_id="${ZELLIJ_PANE_ID:-}"
+  local pane_id=""
+  pane_id="$( (_MX_BACKEND_CHECKED=1 mx_pane_id) 2>/dev/null || echo)"
   local session_id=""
   local agent="claude"
   local cwd="$PWD"
@@ -670,6 +763,7 @@ cmd_register() {
         paneId: $paneId,
         sessionId: (if $sessionId == "" then null else $sessionId end),
         agent: $agent,
+        projectDir: $projectDir,
         cwd: $cwd,
         pid: (if $pid == "" then null else ($pid|tonumber) end),
         lastSeen: ($now|tonumber),
@@ -680,6 +774,7 @@ cmd_register() {
     --arg paneId "$pane_id" \
     --arg sessionId "$session_id" \
     --arg agent "$agent" \
+    --arg projectDir "$PROJECT_DIR" \
     --arg cwd "$cwd" \
     --arg pid "$pid" \
     --arg now "$now" \
@@ -719,6 +814,8 @@ cmd_spawn() {
   done
   [[ -n "$agent" && -n "$name" ]] || { echo "Usage: zcrew spawn [--model <model>] <agent> <name>" >&2; exit 1; }
 
+  _resolve_and_set_project_dir "stateful"
+
   # CLI --model wins. Otherwise resolve from .zcrew/team.conf row:
   #   name agent model role  (whitespace-delimited; "-" or empty = no override)
   if [[ -z "$model" ]]; then
@@ -738,8 +835,8 @@ cmd_spawn() {
 
   # STEP 1: Minimal spawn — just open a new pane. No bx, no wrapper, no
   # sentinel, no registry. Baby steps. Layers added back in subsequent steps.
-  logger "spawn" "info" "entry agent=$agent name=$name model=${model:-} cwd=$PWD ZELLIJ_SESSION_NAME=${ZELLIJ_SESSION_NAME:-} ZELLIJ_PANE_ID=${ZELLIJ_PANE_ID:-}"
-  require_zellij_session
+  logger "spawn" "info" "entry agent=$agent name=$name model=${model:-} cwd=$PWD ZELLIJ_SESSION_NAME=${ZELLIJ_SESSION_NAME:-} ZELLIJ_PANE_ID=${ZELLIJ_PANE_ID:-} MUX_PANE_ID=$( (_MX_BACKEND_CHECKED=1 mx_pane_id) 2>/dev/null || echo)"
+  mx_require_session
   require_project
 
   claim_main_for_send >/dev/null
@@ -760,49 +857,55 @@ cmd_spawn() {
   ensure_bx_managed_mounts "$PROJECT_DIR" >/dev/null 2>&1 || true
   ensure_registry_files
 
-  logger "spawn" "info" "calling zellij action new-pane"
+  logger "spawn" "info" "calling multiplexer new-pane"
 
-  # STEP 4: built-ins use per-agent launchers; unknown agents fall back to a
-  # generic `bx run <agent>` command. The bash wrapper sets a trap so when the
-  # agent (and bx) exit, the registry entry is auto-removed.
-  local zcrew_abs="$PROJECT_DIR/.zcrew/bin/zcrew"
+  # Built-ins use per-agent launchers; unknown agents fall back to a generic
+  # `bx run <agent>` command. The outer bash wrapper sets an EXIT trap so when
+  # the agent (and bx) exit, the registry entry is auto-removed.
+  local zcrew_abs
+  zcrew_abs="$(command -v zcrew 2>/dev/null || true)"
+  [[ -n "$zcrew_abs" && -x "$zcrew_abs" ]] || {
+    echo "zcrew: cannot find zcrew binary on PATH for worker EXIT trap; spawn aborted" >&2
+    return 1
+  }
+  zcrew_abs="$(realpath "$zcrew_abs")"
   local trap_cmd="trap '\"$zcrew_abs\" unregister \"$name\"' EXIT"
   local launch_cmd
-  if [[ -x "$PROJECT_DIR/.zcrew/lib/launchers/$agent.sh" ]]; then
-    launch_cmd="$PROJECT_DIR/.zcrew/lib/launchers/$agent.sh"
+  local launcher_path="$PROJECT_DIR/.zcrew/lib/launchers/$agent.sh"
+  if [[ -x "$launcher_path" ]]; then
+    launch_cmd=$(printf '%q' "$launcher_path")
   else
-    launch_cmd="bx run $(printf '%q' "$agent")"
-    if [[ -n "$model" ]]; then
-      launch_cmd+=" --model $(printf '%q' "$model")"
-      model=""
+    local lib_dir=""
+    if [[ -d "$PROJECT_DIR/.zcrew/lib" ]]; then
+      lib_dir="$(resolve_lib_dir)"
+    fi
+    if [[ -n "$lib_dir" && -x "$lib_dir/launchers/$agent.sh" ]]; then
+      launch_cmd=$(printf '%q' "$lib_dir/launchers/$agent.sh")
+    else
+      launch_cmd="bx run $(printf '%q' "$agent")"
+      if [[ -n "$model" ]]; then
+        launch_cmd+=" --model $(printf '%q' "$model")"
+        model=""
+      fi
     fi
   fi
   local model_prefix=""
   if [[ -n "$model" ]]; then
     model_prefix="export ZCREW_MODEL=$(printf '%q' "$model"); "
   fi
-  local out
+  local pane_id
   local _stderr_file
   _stderr_file=$(mktemp)
-  out=$(zellij action new-pane --cwd "$PROJECT_DIR" --name "$name" -- bash -c "$trap_cmd; ${model_prefix}$launch_cmd" 2>"$_stderr_file")
+  pane_id=$(mx_new_pane "$PROJECT_DIR" "$name" "$trap_cmd; ${model_prefix}$launch_cmd" 2>"$_stderr_file")
   local rc=$?
-  logger "spawn" "info" "new-pane returned rc=$rc out='$out'"
+  logger "spawn" "info" "new-pane returned rc=$rc pane_id='$pane_id'"
 
   if [[ $rc -ne 0 ]]; then
-    echo "zcrew: zellij action new-pane failed: $(cat "$_stderr_file")" >&2
+    echo "zcrew: multiplexer new-pane failed: $(cat "$_stderr_file")" >&2
     rm -f "$_stderr_file"
     exit 1
   fi
   rm -f "$_stderr_file"
-
-  # STEP 2: parse pane ID from new-pane stdout (e.g. "terminal_5" → "5").
-  # grep -m1 guards against stray lines in $out.
-  local pane_id
-  pane_id=$(printf '%s\n' "$out" | grep -m1 '^terminal_' | sed 's/^terminal_//')
-  if [[ -z "$pane_id" ]]; then
-    logger "spawn" "warn" "could not parse pane id from new-pane output: $out"
-    pane_id="?"
-  fi
 
   local now
   now=$(date +%s)
@@ -813,6 +916,7 @@ cmd_spawn() {
         paneId: $paneId,
         sessionId: null,
         agent: $agent,
+        projectDir: $projectDir,
         cwd: $cwd,
         pid: null,
         lastSeen: ($now | tonumber),
@@ -822,6 +926,7 @@ cmd_spawn() {
     --arg name "$name" \
     --arg paneId "$pane_id" \
     --arg agent "$agent" \
+    --arg projectDir "$PROJECT_DIR" \
     --arg cwd "$PROJECT_DIR" \
     --arg now "$now"
 
@@ -829,7 +934,7 @@ cmd_spawn() {
 }
 
 live_pane_ids() {
-  zellij action list-panes 2>/dev/null | sed -n 's/.*terminal_\([0-9][0-9]*\).*/\1/p'
+  mx_list_pane_ids "$@"
 }
 
 # ── codex worker state cleanup ──────────────────────────────────────────
@@ -848,27 +953,45 @@ read_pid_file() {
   printf '%s\n' "$pid"
 }
 
-is_expected_outer_pid() {
+read_starttime_file() {
+  local starttime_file="$1"
+  [[ -f "$starttime_file" ]] || return 1
+  local starttime
+  starttime="$(tr -dc '0-9' < "$starttime_file" || true)"
+  [[ -n "$starttime" ]] || return 1
+  printf '%s\n' "$starttime"
+}
+
+parse_proc_stat_starttime() {
+  local raw="${1:-}"
+  [[ -n "$raw" ]] || return 1
+  local tail="${raw##*) }"
+  awk -v t="$tail" 'BEGIN{n=split(t,a," "); if (n < 20) exit 1; print a[20]}'
+}
+
+read_proc_starttime() {
   local pid="$1"
-  local cmdline
-  cmdline="$(ps -p "$pid" -o cmd= 2>/dev/null || true)"
-  [[ -n "$cmdline" ]] || return 1
-  [[ "$cmdline" == *"codex.sh"* ]] || return 1
-  [[ "$cmdline" == *"--zcrew-inner-codex-launcher"* || "$cmdline" == *"bx run"* || "$cmdline" == *"bash"* ]]
+  local raw
+  raw="$(cat "/proc/$pid/stat" 2>/dev/null)" || return 1
+  parse_proc_stat_starttime "$raw"
 }
 
 kill_outer_pid_if_safe() {
   local pane_id="$1"
   local outer_pid_file="$PROJECT_DIR/.zcrew/state/codex-worker/$pane_id/outer.pid"
-  local pid
+  local outer_starttime_file="$PROJECT_DIR/.zcrew/state/codex-worker/$pane_id/outer.starttime"
+  local pid recorded_starttime current_starttime
   pid="$(read_pid_file "$outer_pid_file" || true)"
   [[ -n "$pid" ]] || return 0
+  recorded_starttime="$(read_starttime_file "$outer_starttime_file" || true)"
+  [[ -n "$recorded_starttime" ]] || return 0
   if ! kill -0 "$pid" 2>/dev/null; then
     return 0
   fi
-  if ! is_expected_outer_pid "$pid"; then
-    logger "gc" "warn" "skip kill for unexpected outer pid paneId=$pane_id pid=$pid"
-    return 1
+  current_starttime="$(read_proc_starttime "$pid" || true)"
+  if [[ -z "$current_starttime" || "$current_starttime" != "$recorded_starttime" ]]; then
+    logger "gc" "warn" "skip kill for mismatched outer pid identity paneId=$pane_id pid=$pid"
+    return 0
   fi
   kill "$pid" 2>/dev/null || true
   local deadline=$((SECONDS + 3))
@@ -914,12 +1037,9 @@ walk_codex_worker_orphans() {
         continue
       fi
     fi
-    if kill_outer_pid_if_safe "$pane_id"; then
-      rm -rf "$pane_path"
-      logger "gc" "info" "cleaned orphan codex worker state paneId=$pane_id mode=$mode"
-    else
-      logger "gc" "warn" "keeping orphan codex worker state (identity check refused kill) paneId=$pane_id"
-    fi
+    kill_outer_pid_if_safe "$pane_id"
+    rm -rf "$pane_path"
+    logger "gc" "info" "cleaned orphan codex worker state paneId=$pane_id mode=$mode"
   done
   shopt -u nullglob
 }
@@ -938,9 +1058,15 @@ cmd_unregister() {
 seed_mcp_configs() {
   local target="$1"
   local target_abs
-  target_abs=$(realpath "$target")
-  local server_path="$target_abs/.zcrew/lib/mcp_server.py"
-  [[ -f "$server_path" ]] || return 0
+  target_abs="$(realpath "$target")"
+  local lib_dir
+  lib_dir="$(resolve_lib_dir "$target_abs")"
+  local server_path="$lib_dir/mcp_server.py"
+  [[ -f "$server_path" ]] || {
+    echo "zcrew install: lib not found at $server_path. This indicates a broken install." >&2
+    echo "Run .zcrew/bin/zcrew install <target> from your zcrew clone to repair." >&2
+    return 1
+  }
 
   # Project-root .mcp.json for Claude Code (host orchestrator).
   local proj_mcp="$target/.mcp.json"
@@ -993,9 +1119,15 @@ seed_mcp_configs() {
 seed_orchestrator_configs() {
   local target="$1"
   local target_abs
-  target_abs=$(realpath "$target")
-  local server_path="$target_abs/.zcrew/lib/mcp_server.py"
-  [[ -f "$server_path" ]] || return 0
+  target_abs="$(realpath "$target")"
+  local lib_dir
+  lib_dir="$(resolve_lib_dir "$target_abs")"
+  local server_path="$lib_dir/mcp_server.py"
+  [[ -f "$server_path" ]] || {
+    echo "zcrew install: lib not found at $server_path. This indicates a broken install." >&2
+    echo "Run .zcrew/bin/zcrew install <target> from your zcrew clone to repair." >&2
+    return 1
+  }
 
   # --- codex: merge [mcp_servers.zcrew] into <target>/.codex/config.toml ---
   # Idempotent: if the block already exists with the correct args, skip.
@@ -1027,10 +1159,10 @@ EOF
   fi
   echo "    .codex/config.toml (orchestrator zcrew MCP entry)"
 
-  # --- pi: symlink <target>/.pi/extensions/zcrew.ts -> ../../.zcrew/lib/pi-zcrew-ext.ts ---
+  # --- pi: symlink <target>/.pi/extensions/zcrew.ts -> <resolved-lib>/pi-zcrew-ext.ts ---
   local pi_ext_dir="$target/.pi/extensions"
   local pi_ext_link="$pi_ext_dir/zcrew.ts"
-  local expected_target="../../.zcrew/lib/pi-zcrew-ext.ts"
+  local expected_target='../../.zcrew/lib/pi-zcrew-ext.ts'
 
   mkdir -p "$pi_ext_dir"
   if [[ -L "$pi_ext_link" ]]; then
@@ -1052,6 +1184,17 @@ EOF
 
 install_bootstrap() {
   local target="$1"
+  local bx_bin="$2"
+  local zcrew_bin="$3"
+
+  # Defensive cleanup: remove stray empty local mountpoint dirs left by bwrap.
+  if [[ -d "$target/.zcrew/bin" ]] && [[ -z "$(find "$target/.zcrew/bin" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
+    rmdir "$target/.zcrew/bin" 2>/dev/null || true
+  fi
+  if [[ -d "$target/.zcrew/lib" ]] && [[ -z "$(find "$target/.zcrew/lib" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
+    rmdir "$target/.zcrew/lib" 2>/dev/null || true
+  fi
+
   write_managed_mise_floor "$target"
   echo "    .config/mise.toml (zcrew managed floor)"
   if command -v mise >/dev/null 2>&1; then
@@ -1060,12 +1203,12 @@ install_bootstrap() {
   fi
   (
     cd "$target"
-    env -u BX_INSIDE ./.zcrew/bin/bx init >/dev/null
+    env -u BX_INSIDE "$bx_bin" init >/dev/null
   )
   echo "    .bx/ (bx init — idempotent)"
   (
     cd "$target"
-    ./.zcrew/bin/zcrew init >/dev/null
+    bash "$zcrew_bin" init >/dev/null
   )
   echo "    .zcrew/ (zcrew init — idempotent)"
   if [[ -d "$target/.bx" ]]; then
@@ -1088,10 +1231,12 @@ install_bootstrap() {
       "audit.log" \
       "spawn/"
     echo "    .zcrew/.gitignore (ensured managed entries)"
+    if [[ -d "$target/.zcrew/lib" ]]; then
+      seed_mcp_configs "$target"
+      echo "    .mcp.json + sandbox MCP configs (zcrew server entry)"
+      seed_orchestrator_configs "$target"
+    fi
   fi
-  seed_mcp_configs "$target"
-  echo "    .mcp.json + sandbox MCP configs (zcrew server entry)"
-  seed_orchestrator_configs "$target"
 }
 
 # Install zcrew into a target project directory.
@@ -1103,10 +1248,12 @@ verify_managed_copy() {
   src_abs="$(realpath "$src_dir")"
   dst_abs="$(realpath "$dst_dir")"
 
+  local display_prefix="${PROJECT_DIR:-$PWD}"
+
   while IFS= read -r -d '' src_path; do
     rel="${src_path#$src_abs/}"
     if [[ ! -f "$dst_abs/$rel" ]] || ! cmp -s "$src_path" "$dst_abs/$rel"; then
-      echo "warning: managed skill path was overwritten after install: ${dst_dir#$PROJECT_DIR/}/$rel" >&2
+      echo "warning: managed skill path was overwritten after install: ${dst_dir#$display_prefix/}/$rel" >&2
       mismatched=1
     fi
   done < <(find -L "$src_abs" -type f -print0)
@@ -1118,17 +1265,165 @@ verify_managed_copy() {
   return 0
 }
 
+count_line_diff() {
+  local left="$1"
+  local right="$2"
+  local left_lines right_lines diff
+  left_lines="$(wc -l < "$left" 2>/dev/null || printf '0\n')"
+  right_lines="$(wc -l < "$right" 2>/dev/null || printf '0\n')"
+  diff=$((left_lines - right_lines))
+  if (( diff < 0 )); then
+    diff=$(( -diff ))
+  fi
+  printf '%s\n' "$diff"
+}
+
+classify_managed_file() {
+  local target_path="$1"
+  local src_path="$2"
+  local rel="${3:-}"
+  local require_owned="${4:-0}"
+
+  if [[ ! -e "$target_path" && ! -L "$target_path" ]]; then
+    printf 'absent\t-\n'
+    return 0
+  fi
+  if cmp -s "$src_path" "$target_path" 2>/dev/null; then
+    printf 'managed-pristine\t-\n'
+    return 0
+  fi
+  if [[ "$require_owned" == "1" ]] && ! is_zcrew_owned_file "$target_path" "$rel"; then
+    printf 'user-file\t-\n'
+    return 0
+  fi
+  printf 'managed-modified\t%s\n' "$(count_line_diff "$src_path" "$target_path")"
+}
+
+print_install_plan_tree() {
+  local src_dir="$1"
+  local dst_dir="$2"
+  local require_owned="${3:-0}"
+  local src_path rel dst_path state meta
+
+  while IFS= read -r -d '' src_path; do
+    rel="${src_path#$src_dir/}"
+    dst_path="$dst_dir/$rel"
+    IFS=$'\t' read -r state meta < <(classify_managed_file "$dst_path" "$src_path" "${dst_path#"$target_abs"/}" "$require_owned")
+    case "$state" in
+      absent)
+        PLAN_REPLACE+=("${dst_path#"$target_abs"/} (create)")
+        ;;
+      managed-pristine)
+        PLAN_REPLACE+=("${dst_path#"$target_abs"/} (overwrite, managed-pristine)")
+        ;;
+      managed-modified)
+        PLAN_REPLACE+=("${dst_path#"$target_abs"/} (overwrite, managed-modified, line-diff=$meta)")
+        ;;
+    esac
+  done < <(find -L "$src_dir" -type f -print0 | sort -z)
+}
+
+print_plan_section() {
+  local title="$1"
+  shift
+  local -a items=("$@")
+  printf '%s\n' "$title"
+  if [[ "${#items[@]}" -eq 0 ]]; then
+    printf '  (none)\n'
+    return 0
+  fi
+  local item
+  for item in "${items[@]}"; do
+    printf '  %s\n' "$item"
+  done
+}
+
+print_install_plan() {
+  local src="$1"
+  local target="$2"
+  local target_abs="$3"
+  local -a PLAN_REPLACE=()
+  local -a PLAN_KEEP=()
+  local -a PLAN_SKIP=()
+  local rel src_path dst_path state meta
+
+  while IFS= read -r rel; do
+    src_path="$src/.zcrew/bin/$rel"
+    dst_path="$target_abs/.zcrew/bin/$rel"
+    IFS=$'\t' read -r state meta < <(classify_managed_file "$dst_path" "$src_path" ".zcrew/bin/$rel" 0)
+    case "$state" in
+      absent) PLAN_REPLACE+=(".zcrew/bin/$rel (create)") ;;
+      managed-pristine) PLAN_REPLACE+=(".zcrew/bin/$rel (overwrite, managed-pristine)") ;;
+      managed-modified) PLAN_REPLACE+=(".zcrew/bin/$rel (overwrite, managed-modified, line-diff=$meta)") ;;
+    esac
+  done < <(zcrew_owned_bin_files)
+
+  while IFS= read -r rel; do
+    src_path="$src/.zcrew/lib/$rel"
+    dst_path="$target_abs/.zcrew/lib/$rel"
+    IFS=$'\t' read -r state meta < <(classify_managed_file "$dst_path" "$src_path" ".zcrew/lib/$rel" 0)
+    case "$state" in
+      absent) PLAN_REPLACE+=(".zcrew/lib/$rel (create)") ;;
+      managed-pristine) PLAN_REPLACE+=(".zcrew/lib/$rel (overwrite, managed-pristine)") ;;
+      managed-modified) PLAN_REPLACE+=(".zcrew/lib/$rel (overwrite, managed-modified, line-diff=$meta)") ;;
+    esac
+  done < <(zcrew_owned_lib_files)
+
+  IFS=$'\t' read -r state meta < <(classify_managed_file "$target_abs/AGENTS.md" "$src/AGENTS.md" "AGENTS.md" 1)
+  case "$state" in
+    absent) PLAN_REPLACE+=("AGENTS.md (create)") ;;
+    managed-pristine|managed-modified) PLAN_KEEP+=("AGENTS.md (will skip; install preserves existing file)") ;;
+    user-file) PLAN_SKIP+=("AGENTS.md (user file; no zcrew ownership marker)") ;;
+  esac
+
+  if [[ "$state" != "absent" ]]; then
+    PLAN_KEEP+=("CLAUDE.md (will skip; AGENTS.md already exists)")
+  elif [[ -e "$target_abs/CLAUDE.md" || -L "$target_abs/CLAUDE.md" ]]; then
+    PLAN_KEEP+=("CLAUDE.md (will skip; install preserves existing file)")
+  else
+    PLAN_REPLACE+=("CLAUDE.md (create symlink to AGENTS.md)")
+  fi
+
+  print_install_plan_tree "$src/.agents/skills/zcrew" "$target_abs/.agents/skills/zcrew" 0
+  print_install_plan_tree "$src/.claude/skills" "$target_abs/.claude/skills" 0
+  print_install_plan_tree "$src/.pi/skills" "$target_abs/.pi/skills" 0
+  print_install_plan_tree "$src/.codex/skills/zcrew" "$target_abs/.codex/skills/zcrew" 0
+
+  PLAN_KEEP+=(".bx/config (bx init idempotent)")
+  PLAN_KEEP+=(".bx/mounts (will merge/rewrite zcrew-managed block)")
+  PLAN_KEEP+=(".bx/.gitignore (will ensure managed entries)")
+  PLAN_KEEP+=(".bx/home/ (preserve sandbox home and runtime state)")
+  PLAN_KEEP+=(".bx/home/.config/git/ignore (will ensure managed entries)")
+  PLAN_KEEP+=(".config/mise.toml (will rewrite zcrew managed floor)")
+  PLAN_KEEP+=(".mcp.json (will merge/rewrite zcrew MCP entry)")
+  PLAN_KEEP+=(".codex/config.toml (will merge/rewrite zcrew block)")
+  PLAN_KEEP+=(".pi/extensions/zcrew.ts (will relink managed extension)")
+  PLAN_KEEP+=(".zcrew/.gitignore (will ensure managed entries)")
+  PLAN_KEEP+=(".zcrew/registry.json (preserve runtime state)")
+  PLAN_KEEP+=(".zcrew/registry.lock (preserve runtime state)")
+  PLAN_KEEP+=(".zcrew/audit.log (preserve runtime state)")
+  PLAN_KEEP+=(".zcrew/spawn/ (preserve runtime state)")
+  PLAN_KEEP+=(".zcrew/team.conf (preserve if present; seed if missing)")
+
+  printf '==> dry-run install plan for %s\n' "$target_abs"
+  print_plan_section "REPLACE" "${PLAN_REPLACE[@]}"
+  print_plan_section "KEEP" "${PLAN_KEEP[@]}"
+  print_plan_section "SKIP" "${PLAN_SKIP[@]}"
+}
+
 cmd_install() {
   CURRENT_SUBCMD="install"
   local target=""
   local keep_compat=false
+  local dry_run=false
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --keep) keep_compat=true ;;
-      --*) echo "Usage: zcrew install [--keep] <target-project-dir>" >&2; exit 1 ;;
+      --dry-run) dry_run=true ;;
+      --*) echo "Usage: zcrew install [--keep] [--dry-run] <target-project-dir>" >&2; exit 1 ;;
       *)
         if [[ -n "$target" ]]; then
-          echo "Usage: zcrew install [--keep] <target-project-dir>" >&2
+          echo "Usage: zcrew install [--keep] [--dry-run] <target-project-dir>" >&2
           exit 1
         fi
         target="$1"
@@ -1136,18 +1431,22 @@ cmd_install() {
     esac
     shift
   done
-  [[ -n "$target" ]] || { echo "Usage: zcrew install [--keep] <target-project-dir>" >&2; exit 1; }
+  [[ -n "$target" ]] || { echo "Usage: zcrew install [--keep] [--dry-run] <target-project-dir>" >&2; exit 1; }
   [[ -d "$target" ]] || { echo "zcrew: target dir does not exist: $target" >&2; exit 1; }
   local target_abs
   target_abs=$(realpath "$target")
 
-  local self src
-  self=$(readlink -f "${BASH_SOURCE[0]}")
-  src=$(dirname "$(dirname "$(dirname "$self")")")
+  local source_info self src
+  source_info="$(detect_install_source)"
+  IFS='|' read -r _self self src <<< "$source_info"
+  local bx_bootstrap_bin zcrew_bootstrap_bin
+  zcrew_bootstrap_bin="$self"
+  bx_bootstrap_bin="$src/.zcrew/bin/bx"
   [[ -f "$src/.zcrew/bin/zcrew" ]] || { echo "zcrew: source repo not found at $src" >&2; exit 1; }
   [[ -f "$src/.zcrew/bin/bx" ]] || { echo "zcrew: source bx missing at $src/.zcrew/bin/bx" >&2; exit 1; }
   [[ -f "$src/.zcrew/bin/ix" ]] || { echo "zcrew: source ix missing at $src/.zcrew/bin/ix" >&2; exit 1; }
   [[ -f "$src/.zcrew/lib/tell" ]] || { echo "zcrew: source tell missing at $src/.zcrew/lib/tell" >&2; exit 1; }
+  [[ -f "$src/.zcrew/lib/multiplexer.sh" ]] || { echo "zcrew: source multiplexer missing at $src/.zcrew/lib/multiplexer.sh" >&2; exit 1; }
   [[ -f "$src/.zcrew/lib/launchers/claude.sh" ]] || { echo "zcrew: source launcher missing at $src/.zcrew/lib/launchers/claude.sh" >&2; exit 1; }
   [[ -f "$src/.zcrew/lib/launchers/codex.sh" ]] || { echo "zcrew: source launcher missing at $src/.zcrew/lib/launchers/codex.sh" >&2; exit 1; }
   [[ -f "$src/.zcrew/lib/launchers/pi.sh" ]] || { echo "zcrew: source launcher missing at $src/.zcrew/lib/launchers/pi.sh" >&2; exit 1; }
@@ -1159,18 +1458,18 @@ cmd_install() {
 
   local src_abs migrated stale
   src_abs=$(realpath "$src")
+  if [[ "$dry_run" == "true" ]]; then
+    print_install_plan "$src" "$target" "$target_abs"
+    return 0
+  fi
   if [[ "$src_abs" == "$target_abs" ]]; then
     echo "==> source == target ($target_abs); skipping materialization, running bootstrap only"
-    install_bootstrap "$target"
+    install_bootstrap "$target" "$bx_bootstrap_bin" "$zcrew_bootstrap_bin"
     return 0
   fi
 
   migrated=false
-  stale=false
   [[ -x "$target/.zcrew/bin/zcrew" ]] && migrated=true
-  if [[ "$migrated" != "true" ]] && has_stale_layout "$target"; then
-    stale=true
-  fi
 
   echo "==> installing zcrew from $src into $target"
   copy_managed_layout "$src" "$target"
@@ -1242,22 +1541,12 @@ cmd_install() {
   rm -f "$target/.claude/hooks/zcrew-register.sh"
   rmdir --ignore-fail-on-non-empty "$target/.claude/hooks" 2>/dev/null || true
 
-  if [[ "$stale" == "true" ]]; then
-    remove_stale_layout "$target" true
-  elif [[ "$keep_compat" != "true" ]]; then
-    remove_stale_layout "$target"
-  fi
-
   if [[ "$keep_compat" == "true" ]]; then
     create_keep_symlinks "$target"
     echo "    bin/zcrew etc. are now symlinks (transitional); add to .gitignore yourself if desired"
   fi
 
-  install_bootstrap "$target"
-
-  if [[ "$stale" == "true" ]]; then
-    echo "warning: close all worker panes before relying on the new layout — in-flight EXIT traps still reference old bin/zcrew"
-  fi
+  install_bootstrap "$target" "$bx_bootstrap_bin" "$zcrew_bootstrap_bin"
 
   echo ""
   echo "==> zcrew installed in $target_abs"
@@ -1301,9 +1590,9 @@ cmd_rename() {
   ' \
     --arg old "$old" \
     --arg new "$new"
-  # Also rename the zellij pane title so the tab label reflects the new name.
-  if [[ -n "$pane_id" ]] && command -v zellij >/dev/null 2>&1; then
-    zellij action rename-pane -p "$pane_id" "$new" 2>/dev/null || true
+  # Best-effort: rename the live pane title when a multiplexer session exists.
+  if [[ -n "$pane_id" ]]; then
+    mx_rename_pane "$pane_id" "$new" >/dev/null 2>&1 || true
   fi
   echo "renamed: $old -> $new"
 }
@@ -1312,7 +1601,8 @@ resolve_sender_name_readonly() {
   require_project
   ensure_registry_files
 
-  local pane_id="${ZELLIJ_PANE_ID:-}"
+  local pane_id=""
+  pane_id="$( (_MX_BACKEND_CHECKED=1 mx_pane_id) 2>/dev/null || echo)"
   [[ -n "$pane_id" ]] || pane_id="0"
 
   jq -r --arg paneId "$pane_id" '
@@ -1348,7 +1638,8 @@ claim_main_alias() {
   require_project
   ensure_registry_files
 
-  local pane_id="${ZELLIJ_PANE_ID:-}"
+  local pane_id=""
+  pane_id="$(mx_pane_id 2>/dev/null || true)"
   [[ -n "$pane_id" ]] || pane_id="0"
 
   local now live_json
@@ -1367,6 +1658,7 @@ claim_main_alias() {
             paneId: $paneId,
             sessionId: null,
             agent: "unknown",
+            projectDir: $projectDir,
             cwd: $cwd,
             pid: ($pid | tonumber),
             lastSeen: ($now | tonumber),
@@ -1375,6 +1667,7 @@ claim_main_alias() {
         | .panes |= del(.["pane-" + $paneId])
         | .panes.main = ($entry
             | .paneId = $paneId
+            | .projectDir = (.projectDir // $projectDir)
             | .cwd = (.cwd // $cwd)
             | .pid = (.pid // ($pid | tonumber))
             | .lastSeen = ($now | tonumber)
@@ -1385,6 +1678,7 @@ claim_main_alias() {
   ' \
     --arg force "$force_replace" \
     --arg paneId "$pane_id" \
+    --arg projectDir "$PROJECT_DIR" \
     --arg cwd "$PWD" \
     --arg pid "$$" \
     --arg now "$now" \
@@ -1400,7 +1694,8 @@ claim_main_for_send() {
     return 0
   fi
 
-  local pane_id="${ZELLIJ_PANE_ID:-}"
+  local pane_id=""
+  pane_id="$(mx_pane_id 2>/dev/null || true)"
   [[ -n "$pane_id" ]] || return 0
 
   claim_main_alias false
@@ -1419,6 +1714,26 @@ lookup_registered_agent() {
 lookup_registered_cwd() {
   local name="${1:-}"
   jq -r --arg name "$name" '.panes[$name].cwd // empty' "$REGISTRY_FILE"
+}
+
+lookup_registered_project_dir() {
+  local name="${1:-}"
+  jq -r --arg name "$name" '.panes[$name].projectDir // empty' "$REGISTRY_FILE"
+}
+
+backfill_registered_project_dir() {
+  local name="${1:-}"
+  local project_dir="${2:-}"
+  [[ -n "$name" && -n "$project_dir" ]] || return 1
+  registry_write_jq '
+    if .panes[$name] == null then
+      .
+    else
+      .panes[$name].projectDir = $projectDir
+    end
+  ' \
+    --arg name "$name" \
+    --arg projectDir "$project_dir"
 }
 
 write_claude_target_state() {
@@ -1552,13 +1867,13 @@ cmd_close() {
     exit 1
   fi
 
-  if [[ "$force" != "true" && -n "${ZELLIJ_PANE_ID:-}" && "$pane_id" == "$ZELLIJ_PANE_ID" ]]; then
+  if [[ "$force" != "true" && "$pane_id" == "$(mx_pane_id)" ]]; then
     echo "zcrew: refusing to close yourself ($name, pane=$pane_id) — use: zcrew close --force $name" >&2
     exit 1
   fi
 
   local close_err=""
-  if ! close_err=$(zellij action close-pane -p "$pane_id" 2>&1); then
+  if ! close_err=$(mx_close_pane "$pane_id" 2>&1); then
     logger "close" "warn" "close-pane failed name=$name paneId=$pane_id err='$close_err'"
     [[ -n "$close_err" ]] && echo "$close_err" >&2
   fi
@@ -1568,9 +1883,8 @@ cmd_close() {
   # only exists for codex workers).
   local codex_state_dir="$PROJECT_DIR/.zcrew/state/codex-worker/$pane_id"
   if [[ -d "$codex_state_dir" ]]; then
-    if kill_outer_pid_if_safe "$pane_id"; then
-      rm -rf "$codex_state_dir"
-    fi
+    kill_outer_pid_if_safe "$pane_id"
+    rm -rf "$codex_state_dir"
   fi
 
   "$0" unregister "$name"
@@ -1590,7 +1904,7 @@ cmd_send() {
   shift || true
   [[ -n "$name" && $# -gt 0 ]] || { echo "Usage: zcrew send [--compact] <name> <message>" >&2; exit 1; }
   local message="$*"
-  require_zellij_session
+  mx_require_session
   logger "send" "info" "entry name=$name msgLen=${#message}"
 
   claim_main_for_send >/dev/null
@@ -1608,6 +1922,27 @@ cmd_send() {
     else
       echo "zcrew: unknown pane name '$name'" >&2
     fi
+    exit 1
+  fi
+
+  local target_project_dir
+  target_project_dir="$(lookup_registered_project_dir "$name")"
+  if [[ -z "$target_project_dir" ]]; then
+    local target_cwd
+    target_cwd="$(lookup_registered_cwd "$name")"
+    if target_project_dir="$(resolve_project_dir_from_path_if_resolvable "$target_cwd")"; then
+      backfill_registered_project_dir "$name" "$target_project_dir"
+    else
+      echo "zcrew: project ownership for pane '$name' is unknown; respawn pane." >&2
+      exit 1
+    fi
+  fi
+  if [[ "$target_project_dir" != "$PROJECT_DIR" ]]; then
+    {
+      echo "zcrew: refusing to send to pane '$name' registered in a different project."
+      echo "zcrew: current project: $PROJECT_DIR"
+      echo "zcrew: target project: $target_project_dir"
+    } >&2
     exit 1
   fi
 
@@ -1632,7 +1967,8 @@ cmd_send() {
   fi
 
   refresh_claude_auth_for_target "$(lookup_registered_cwd "$name")" "$target_agent"
-  local tell_bin="$PROJECT_DIR/.zcrew/lib/tell"
+  local tell_bin
+  tell_bin="$(resolve_lib_dir)/tell"
   if [[ ! -x "$tell_bin" ]]; then
     echo "zcrew: missing tell transport at $tell_bin — run: zcrew install ." >&2
     exit 1
@@ -1685,14 +2021,20 @@ cmd_claim() {
     echo "zcrew claim is host-only; run it in the orchestrator pane." >&2
     exit 1
   fi
-  if [[ -z "${ZELLIJ_PANE_ID:-}" || -z "${ZELLIJ_SESSION_NAME:-}" ]]; then
-    echo "zcrew: claim must be run inside a zellij pane" >&2
+  local pane_id=""
+  if ! pane_id="$(mx_pane_id 2>/dev/null)"; then
+    echo "zcrew: claim must be run inside a multiplexer pane" >&2
+    exit 1
+  fi
+  local session=""
+  if ! session="$(mx_session_name 2>/dev/null)"; then
+    echo "zcrew: claim must be run inside a multiplexer pane" >&2
     exit 1
   fi
 
   require_project
   ensure_registry_files
-  require_zellij_session
+  mx_require_session
 
   local replace=false
   while [[ $# -gt 0 ]]; do
@@ -1703,7 +2045,6 @@ cmd_claim() {
     shift
   done
 
-  local pane_id="$ZELLIJ_PANE_ID"
   local live_main_info live_main_name live_main_pane
   live_main_info="$(lookup_live_main_info)"
   if [[ -n "$live_main_info" ]]; then
@@ -1734,15 +2075,15 @@ cmd_list() {
   fi
 }
 
-reconcile_registry_with_zellij() {
+reconcile_registry_with_live_panes() {
   local prune="${1:-false}"
   [[ -n "${BX_INSIDE:-}" ]] && return 0
 
   local live_json now registry_count
-  live_json=$(zellij action list-panes 2>/dev/null | sed -n 's/.*terminal_\([0-9][0-9]*\).*/\1/p' | jq -Rsc 'split("\n") | map(select(length>0))')
+  live_json=$(live_pane_ids | jq -Rsc 'split("\n") | map(select(length>0))')
   registry_count=$(jq '(.panes // {}) | length' "$REGISTRY_FILE")
   if [[ "$prune" == "true" && "$live_json" == "[]" && "$registry_count" -gt 0 ]]; then
-    echo "warning: zellij returned no live panes; preserving non-empty registry" >&2
+    echo "warning: multiplexer returned no live panes; preserving non-empty registry" >&2
     return 0
   fi
   now=$(date +%s)
@@ -1769,11 +2110,12 @@ reconcile_registry_with_zellij() {
         | map(. as $id | select(
             ($root.panes | to_entries | map(.value.paneId == $id) | any) | not
           ))
-        | map({
+          | map({
             ("pane-" + .): {
               paneId: .,
               sessionId: null,
               agent: "unknown",
+              projectDir: $projectDir,
               cwd: null,
               pid: null,
               lastSeen: ($now | tonumber),
@@ -1785,6 +2127,7 @@ reconcile_registry_with_zellij() {
   ' \
     --argjson live "$live_json" \
     --arg prune "$prune" \
+    --arg projectDir "$PROJECT_DIR" \
     --arg now "$now"
 
   walk_codex_worker_orphans "safe"
@@ -1825,7 +2168,7 @@ cmd_sync() {
   done
   logger "sync" "info" "entry prune=$prune"
 
-  reconcile_registry_with_zellij "$prune"
+  reconcile_registry_with_live_panes "$prune"
 
   logger "sync" "info" "done prune=$prune"
   echo "synced"

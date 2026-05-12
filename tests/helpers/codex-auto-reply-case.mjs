@@ -220,18 +220,6 @@ class FakeWsServer {
     }
     if (msg.method === 'thread/resume') {
       setImmediate(() => {
-        const hasExperimentalApi = this.capabilities?.experimentalApi === true;
-        if (msg.params?.excludeTurns === true && !hasExperimentalApi) {
-          sock.serverSend({
-            jsonrpc: '2.0',
-            id: msg.id,
-            error: {
-              code: -32602,
-              message: 'thread/resume.excludeTurns requires experimentalApi capability',
-            },
-          });
-          return;
-        }
         sock.serverSend({ jsonrpc: '2.0', id: msg.id, result: { thread: { id: msg.params.threadId, turns: [] } } });
         if (!this.resumed.has(msg.params.threadId)) {
           this.resumed.add(msg.params.threadId);

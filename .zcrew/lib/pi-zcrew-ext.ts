@@ -9,10 +9,11 @@
  */
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { accessSync, constants, realpathSync, statSync } from "node:fs";
 
 const execFileAsync = promisify(execFile);
 
@@ -22,9 +23,37 @@ const execFileAsync = promisify(execFile);
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const ZCREW_BIN =
-  process.env.ZCREW_BIN ||
-  resolve(__dirname, "../bin/zcrew");
+function isExecutableFile(p: string): boolean {
+  try {
+    return statSync(p).isFile() && (accessSync(p, constants.X_OK), true);
+  } catch {
+    return false;
+  }
+}
+
+function resolveZcrewBin(): string {
+  const override = process.env.ZCREW_BIN;
+  if (override) {
+    if (isExecutableFile(override)) return realpathSync(override);
+    throw new Error(`ZCREW_BIN is set but not executable: ${override}`);
+  }
+
+  const sibling = resolve(__dirname, "../bin/zcrew");
+  if (isExecutableFile(sibling)) return realpathSync(sibling);
+
+  try {
+    const found = execFileSync("bash", ["-lc", "command -v zcrew"], {
+      encoding: "utf8",
+    }).trim();
+    if (found && isExecutableFile(found)) return realpathSync(found);
+  } catch {}
+
+  throw new Error(
+    "zcrew binary not found (checked ZCREW_BIN, local ../bin/zcrew, and PATH)",
+  );
+}
+
+const ZCREW_BIN = resolveZcrewBin();
 
 // ---------------------------------------------------------------------------
 // Shell-out helper
