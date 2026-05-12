@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Do not mutate commit messages here.
+#
+# The required AI provenance trailer is enforced in `.githooks/commit-msg`.
+# Agents must provide it deliberately in the final commit message.
+
+set -euo pipefail
+exit 0

@@ -1,0 +1,3 @@
+[tasks.install-hooks]
+description = "wire .githooks via core.hooksPath"
+run = "git config core.hooksPath .githooks && echo 'core.hooksPath = .githooks'"

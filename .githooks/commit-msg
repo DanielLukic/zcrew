@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Enforce deliberate AI provenance. The hook does not infer harness/model from
+# environment because those signals vary by tool and host setup.
+
+set -euo pipefail
+
+COMMIT_MSG_FILE="$1"
+
+last_meaningful_line="$(
+    awk 'NF && $0 !~ /^[[:space:]]*#/ { line = $0 } END { print line }' "$COMMIT_MSG_FILE"
+)"
+
+co_author_regex='^Co-Authored-By: .+ <[^<>[:space:]]+@[^<>[:space:]]+\.[^<>[:space:]]+>$'
+if [[ "$last_meaningful_line" =~ $co_author_regex ]]; then
+    exit 0
+fi
+
+cat >&2 <<'EOF'
+ERROR: missing required AI provenance trailer.
+
+The last meaningful line of every commit message must be:
+  Co-Authored-By: <agent and model> <email>
+
+Examples:
+  Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+  Co-Authored-By: Claude Code <noreply@anthropic.com>
+  Co-Authored-By: Codex CLI <noreply@openai.com>
+
+Do not rely on environment detection. The agent creating the commit must write
+the trailer deliberately as the final line.
+EOF
+
+exit 1

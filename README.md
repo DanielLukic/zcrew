@@ -39,6 +39,16 @@ cd /path/to/your/project
 This copies `.zcrew/bin/zcrew`, `.zcrew/bin/bx`, `.zcrew/lib/launchers/`, the canonical cross-tool zcrew skill, tool-specific helper skills, root agent docs, sandbox config, and a managed mise floor into your project. Re-run to update. Use `--dry-run` to preview what an install would do without mutating any files.
 After running `zcrew install .` in an existing project, restart your claude orchestrator session so it reloads `.mcp.json`.
 
+### Contributing — git hooks
+
+If you're contributing to zcrew itself, wire the AI-provenance commit hooks once:
+
+```bash
+mise run install-hooks
+```
+
+This sets `core.hooksPath = .githooks`, enforcing a `Co-Authored-By: <agent> <email>` trailer on every commit.
+
 ## Quick start
 
 Launch your orchestrator (Claude, Codex, or Pi) in the project root. The orchestrator reads the zcrew skill and knows how to spawn and manage agents. `AGENTS.md` is the committed root entrypoint; `CLAUDE.md` is a symlink to it for Claude-facing compatibility.
