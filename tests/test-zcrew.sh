@@ -2419,6 +2419,44 @@ EOF
   ! printf '%s\n' "$out" | grep -Fxq '  .mcp.json'
 }
 
+test_18z_dryrun_stale_codex_config_toml_reported_exit_one() {
+  local d out rc
+  d="$(new_test_dir 18z)"
+  mkdir -p "$d/.codex"
+  cat > "$d/.codex/config.toml" <<EOF
+[mcp_servers.zcrew]
+command = "python3"
+args = ["/old/proj/.zcrew/lib/mcp_server.py"]
+EOF
+  out="$(dryrun_install_cmd "$TEST_ROOT" "$d" --dry-run 2>&1)"; rc=$?
+  [[ "$rc" -eq 1 ]] || return 1
+  printf '%s\n' "$out" | grep -Fq 'STALE PATHS DETECTED' || return 1
+  printf '%s\n' "$out" | grep -Fq '.codex/config.toml' || return 1
+  printf '%s\n' "$out" | grep -Fq '/old/proj/.zcrew/lib/mcp_server.py' || return 1
+}
+
+test_18za_dryrun_relative_path_not_flagged_as_stale() {
+  local d out rc
+  d="$(new_test_dir 18za)"
+  mkdir -p "$d/.zcrew/lib"
+  cat > "$d/.mcp.json" <<EOF
+{"mcpServers":{"zcrew":{"command":"python3","args":["./.zcrew/lib/mcp_server.py"]}}}
+EOF
+  out="$(dryrun_install_cmd "$TEST_ROOT" "$d" --dry-run 2>&1)"; rc=$?
+  [[ "$rc" -eq 0 ]] || return 1
+  ! printf '%s\n' "$out" | grep -Fq 'STALE PATHS'
+}
+
+test_18zb_dryrun_malformed_mcp_json_not_crashy() {
+  local d out rc
+  d="$(new_test_dir 18zb)"
+  mkdir -p "$d"
+  printf 'not-valid-json-at-all\n' > "$d/.mcp.json"
+  out="$(dryrun_install_cmd "$TEST_ROOT" "$d" --dry-run 2>&1)"; rc=$?
+  [[ "$rc" -eq 0 ]] || return 1
+  ! printf '%s\n' "$out" | grep -Fq 'STALE PATHS'
+}
+
 test_19_resolve_project_dir_from_root_uses_local_state() {
   local d out
   d="$(new_test_dir 19-project)"
@@ -5332,6 +5370,9 @@ main() {
   run_test "18w) dry-run reports stale .claude/settings.local.json and exits 1" test_18w_dryrun_stale_claude_settings_reported_exit_one
   run_test "18x) dry-run reports stale .bx/mounts and exits 1" test_18x_dryrun_stale_bx_mounts_reported_exit_one
   run_test "18y) dry-run mixed clean+stale reports only stale and exits 1" test_18y_dryrun_mixed_clean_and_stale_reports_only_stale
+  run_test "18z) dry-run reports stale .codex/config.toml and exits 1" test_18z_dryrun_stale_codex_config_toml_reported_exit_one
+  run_test "18za) dry-run does not flag relative paths as stale" test_18za_dryrun_relative_path_not_flagged_as_stale
+  run_test "18zb) dry-run malformed .mcp.json does not crash" test_18zb_dryrun_malformed_mcp_json_not_crashy
   run_test "19) resolve_project_dir uses state from project root" test_19_resolve_project_dir_from_root_uses_local_state
   run_test "20) resolve_project_dir walks up from subdir" test_20_resolve_project_dir_walks_up_from_subdir
   run_test "20b) resolve_project_dir fails outside zcrew tree" test_20b_resolve_project_dir_fails_outside_zcrew_tree

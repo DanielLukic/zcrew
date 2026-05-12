@@ -1420,6 +1420,7 @@ print_stale_paths() {
 
   is_stale_zcrew_path() {
     local path="$1"
+    [[ "$path" == /* ]] || return 1
     [[ "$path" =~ ^.*/\.zcrew/(bin|lib)(/|$) ]] || return 1
     local prefix="${path%/.zcrew/*}/.zcrew"
     [[ "$prefix" != "$zcrew_prefix" ]]
