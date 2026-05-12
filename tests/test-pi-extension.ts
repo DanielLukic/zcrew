@@ -123,6 +123,12 @@ assert(source.includes('pi.on("agent_end"'), "worker registers agent_end handler
 // Worker no longer registers a tool; only orchestrator does (zcrew_send / zcrew_list).
 assert(!source.includes('name: "zcrew_reply"'), "worker does NOT register zcrew_reply tool");
 
+// Failure handling: no silent swallow — agent gets steer + notify
+assert(!source.includes('.catch(() => {})'), "worker does NOT silently swallow reply failures");
+assert(source.includes('pi.notify("zcrew reply failed:'), "worker notifies user on reply failure");
+assert(source.includes('deliverAs: "steer"'), "worker sends steer message on reply failure");
+assert(source.includes('console.error("[zcrew] reply failed:", err)'), "worker logs reply failures to console");
+
 // ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------

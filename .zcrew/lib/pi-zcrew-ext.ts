@@ -129,7 +129,19 @@ export default function (pi: ExtensionAPI): void {
           .join("")
           .trim();
         if (!text) continue;
-        await runZcrew(replyArgs({ message: text })).catch(() => {});
+        try {
+          await runZcrew(replyArgs({ message: text }));
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error("[zcrew] reply failed:", err);
+          pi.notify("zcrew reply failed: " + msg, "error");
+          pi.sendUserMessage(
+            "ADAPTER ERROR: failed to deliver this turn's reply via zcrew (" +
+              msg +
+              "). Please attempt to inform the user, retry, or escalate.",
+            { deliverAs: "steer" },
+          );
+        }
         return;
       }
     });
