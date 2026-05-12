@@ -28,9 +28,16 @@ if command -v jq >/dev/null 2>&1; then
   [[ -f "$settings_local" ]] || printf '{}\n' > "$settings_local"
   stop_hook_cmd="$lib_dir/stop-hook.sh"
   settings_tmp="$settings_local.tmp.$$"
-  if jq --arg cmd "$stop_hook_cmd" '
+  if jq --arg cmd "$stop_hook_cmd" --arg legacy_cmd "$HOME/.local/share/zcrew/lib/stop-hook.sh" '
     .hooks = (.hooks // {})
     | .hooks.Stop = (.hooks.Stop // [])
+    | .hooks.Stop = (.hooks.Stop | map(
+        .hooks = ((.hooks // []) | map(select(
+          (.type != "command") or
+          ((.command | type) != "string") or
+          (.command != $legacy_cmd)
+        )))
+      ) | map(select((.hooks // []) | length > 0)))
     | if ([.hooks.Stop[]?.hooks[]? | select(.type == "command" and .command == $cmd)] | length) > 0
       then . else .hooks.Stop += [{matcher:"*", hooks:[{type:"command", command:$cmd}]}] end
   ' "$settings_local" > "$settings_tmp" 2>/dev/null; then
