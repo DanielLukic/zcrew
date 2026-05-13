@@ -203,8 +203,8 @@ mx_list_panes() {
     tmux)
       local session_name=""
       session_name="$(mx_session_name 2>/dev/null)" || return 0
-      tmux list-panes -a -F '#{pane_id}|#{pane_title}|#{session_name}' 2>/dev/null |
-        awk -F '|' -v s="$session_name" '$3==s {
+      tmux list-panes -a -F $'#{pane_id}\x01#{pane_title}\x01#{session_name}' 2>/dev/null |
+        awk -F $'\x01' -v s="$session_name" '$3==s {
           sub(/^%/, "", $1)
           gsub(/\t/, " ", $2)
           print $1 "\t" $2

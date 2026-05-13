@@ -220,7 +220,7 @@ require_project() {
   if [[ "$ZCREW_PROJECT_READY" != "1" ]]; then
     if [[ "$ZCREW_AUTO_SYNC" == "1" ]]; then
       logger "$CURRENT_SUBCMD" "info" "auto-sync begin"
-      reconcile_registry_with_live_panes "true"
+      reconcile_registry_with_live_panes "false"
       logger "$CURRENT_SUBCMD" "info" "auto-sync end"
     fi
     ZCREW_PROJECT_READY=1
@@ -841,9 +841,10 @@ cmd_spawn() {
 
   claim_main_for_send >/dev/null
 
-  local existing_pane
+  local existing_pane existing_status
   existing_pane=$(jq -r --arg n "$name" '.panes[$n].paneId // empty' "$REGISTRY_FILE")
-  if [[ -n "$existing_pane" ]]; then
+  existing_status=$(jq -r --arg n "$name" '.panes[$n].status // empty' "$REGISTRY_FILE")
+  if [[ -n "$existing_pane" && "$existing_status" != "detached" ]]; then
     echo "zcrew: pane '$name' already exists (pane=$existing_pane) — close it first with: zcrew close $name" >&2
     exit 1
   fi
@@ -2069,7 +2070,7 @@ cmd_send() {
 
   local reg_status
   reg_status="$(lookup_registered_status "$name")"
-  if [[ "$reg_status" == "detached" ]]; then
+  if [[ "$reg_status" == "detached" ]] && ! live_pane_ids | grep -qFx "$pane_id"; then
     logger "send" "warn" "detached pane name=$name paneId=$pane_id"
     echo "zcrew: name='$name' is detached (pane gone after restart); respawn or unregister." >&2
     echo "  zcrew spawn $target_agent $name     # respawn" >&2
@@ -2336,7 +2337,7 @@ cmd_sync() {
   CURRENT_SUBCMD="sync"
   ZCREW_AUTO_SYNC=0
   require_project
-  local prune="true"
+  local prune="false"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --keep-stale) prune="false" ;;
