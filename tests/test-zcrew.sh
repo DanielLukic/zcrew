@@ -660,7 +660,21 @@ case "${1:-}" in
     shift
     case "${1:-}" in
       list-panes)
-        printf '%s\n' "$LIST_OUTPUT"
+        # Backward-compat: auto-convert old-format terminal_NNN lines to full format
+        if [[ "$LIST_OUTPUT" == $'PANE_ID'* ]]; then
+          printf '%s\n' "$LIST_OUTPUT"
+        else
+          printf 'PANE_ID  TYPE  TITLE\n'
+          while IFS= read -r line; do
+            [[ -n "$line" ]] || continue
+            if [[ "$line" == terminal_* ]]; then
+              id="${line#terminal_}"
+              printf '%s  terminal  pane-%s\n' "$line" "$id"
+            else
+              printf '%s\n' "$line"
+            fi
+          done <<< "$LIST_OUTPUT"
+        fi
         ;;
       close-pane)
         if [[ -n "$CLOSE_LOG_FILE" ]]; then
@@ -1449,7 +1463,7 @@ test_10_sync_no_prune_marks_stale_not_delete() {
   ) || return 1
 
   jq -e '.panes | has("stale") and has("live")' "$d/.zcrew/registry.json" >/dev/null || return 1
-  [[ "$(jq -r '.panes.stale.status' "$d/.zcrew/registry.json")" == "stale" ]] || return 1
+  [[ "$(jq -r '.panes.stale.status' "$d/.zcrew/registry.json")" == "detached" ]] || return 1
   [[ "$(jq -r '.panes.live.status' "$d/.zcrew/registry.json")" == "alive" ]]
 }
 
@@ -2894,7 +2908,7 @@ test_24_sync_keep_stale_preserves_entries() {
   )" || return 1
 
   [[ "$out" == "synced" ]] || return 1
-  jq -e '.panes.dead.status == "stale"' "$d/.zcrew/registry.json" >/dev/null
+  jq -e '.panes.dead.status == "detached"' "$d/.zcrew/registry.json" >/dev/null
 }
 
 test_25_skill_passthrough_forwards_arguments() {

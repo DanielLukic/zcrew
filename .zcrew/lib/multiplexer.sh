@@ -182,6 +182,37 @@ mx_list_pane_ids() {
   esac
 }
 
+# mx_list_panes returns one line per live terminal pane:
+#   pane_id<TAB>title
+# Pane IDs have prefixes stripped (no terminal_ / no %).
+# Titles are sanitized: tabs collapsed to single space.
+mx_list_panes() {
+  _mx_require_backend
+  case "$_MX_BACKEND" in
+    zellij)
+      zellij action list-panes 2>/dev/null |
+        awk 'NR==1 {next} $2=="terminal" {
+          sub(/^terminal_/, "", $1)
+          # Reconstruct title from field 3 onward (may contain spaces)
+          title = $3
+          for (i=4; i<=NF; i++) title = title " " $i
+          gsub(/\t/, " ", title)
+          print $1 "\t" title
+        }'
+      ;;
+    tmux)
+      local session_name=""
+      session_name="$(mx_session_name 2>/dev/null)" || return 0
+      tmux list-panes -a -F '#{pane_id}|#{pane_title}|#{session_name}' 2>/dev/null |
+        awk -F '|' -v s="$session_name" '$3==s {
+          sub(/^%/, "", $1)
+          gsub(/\t/, " ", $2)
+          print $1 "\t" $2
+        }'
+      ;;
+  esac
+}
+
 mx_send_text() {
   _mx_require_backend
   case "$_MX_BACKEND" in

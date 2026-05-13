@@ -1827,6 +1827,11 @@ lookup_registered_project_dir() {
   jq -r --arg name "$name" '.panes[$name].projectDir // empty' "$REGISTRY_FILE"
 }
 
+lookup_registered_status() {
+  local name="${1:-}"
+  jq -r --arg name "$name" '.panes[$name].status // empty' "$REGISTRY_FILE"
+}
+
 backfill_registered_project_dir() {
   local name="${1:-}"
   local project_dir="${2:-}"
@@ -2062,6 +2067,16 @@ cmd_send() {
     exit 1
   fi
 
+  local reg_status
+  reg_status="$(lookup_registered_status "$name")"
+  if [[ "$reg_status" == "detached" ]]; then
+    logger "send" "warn" "detached pane name=$name paneId=$pane_id"
+    echo "zcrew: name='$name' is detached (pane gone after restart); respawn or unregister." >&2
+    echo "  zcrew spawn $target_agent $name     # respawn" >&2
+    echo "  zcrew unregister $name               # remove entry" >&2
+    exit 1
+  fi
+
   if ! live_pane_ids | grep -qFx "$pane_id"; then
     logger "send" "warn" "stale pane name=$name paneId=$pane_id"
     if [[ -n "${BX_INSIDE:-}" && "$name" == "main" ]]; then
@@ -2226,40 +2241,57 @@ reconcile_registry_with_live_panes() {
   local prune="${1:-false}"
   [[ -n "${BX_INSIDE:-}" ]] && return 0
 
-  local live_json now registry_count
-  live_json=$(live_pane_ids | jq -Rsc 'split("\n") | map(select(length>0))')
+  local live_panes_json live_ids_json now registry_count
+  live_panes_json=$(mx_list_panes | jq -Rsc 'split("\n") | map(select(length>0) | split("\t") | {id: .[0], title: .[1]})')
+  live_ids_json=$(printf '%s' "$live_panes_json" | jq '[.[].id]')
   registry_count=$(jq '(.panes // {}) | length' "$REGISTRY_FILE")
-  if [[ "$prune" == "true" && "$live_json" == "[]" && "$registry_count" -gt 0 ]]; then
+  if [[ "$prune" == "true" && "$live_ids_json" == "[]" && "$registry_count" -gt 0 ]]; then
     echo "warning: multiplexer returned no live panes; preserving non-empty registry" >&2
     return 0
   fi
   now=$(date +%s)
 
   # Three things at once:
-  # 1) Mark known panes alive/stale based on live set (or prune stale if --prune)
-  # 2) Auto-register live panes that aren't in the registry as pane-<id>
-  #    with agent="unknown" — user can /zname to give them real names
+  # 1) Rebind registered entries by pane title (survives mux restart),
+  #    or mark alive if paneId still live, or detached if gone.
+  # 2) Prune only detached entries when --prune.
+  # 3) Auto-register live panes that aren't in the registry as pane-<id>.
   registry_write_jq '
     .version = 1
     | .panes = (.panes // {})
-    # step 1: status update or prune
+    # Build liveByTitle (first match wins on title collision)
+    | ($livePanes | reduce .[] as $p ({}; if has($p.title) then . else .[$p.title] = $p.id end)) as $liveByTitle
+    | ($livePanes | map(.id)) as $liveIds
+    # Step 1: rebind by title, mark alive by paneId, or detached
+    | .panes |= with_entries(
+        if $liveByTitle[(.key)] != null then
+          .value.paneId = $liveByTitle[(.key)]
+          | .value.status = "alive"
+          | .value.lastSeen = ($now | tonumber)
+        elif ((.value.paneId // "") as $id | $liveIds | index($id)) != null then
+          .value.status = "alive"
+          | .value.lastSeen = ($now | tonumber)
+        else
+          .value.status = "detached"
+        end
+      )
+    # Step 2: prune only detached entries if --prune
     | if $prune == "true" then
-        .panes |= with_entries(select((.value.paneId // "") as $id | ($live | index($id)) != null))
+        .panes |= with_entries(select(.value.status != "detached"))
       else
-        .panes |= with_entries(
-          .value.status = (((.value.paneId // "") as $id | if ($live | index($id)) != null then "alive" else "stale" end))
-        )
+        .
       end
-    # step 2: register unknown live panes as pane-<id> placeholders
+    # Step 3: auto-register unknown live panes as pane-<id>
     | . as $root
     | .panes += (
-        $live
-        | map(. as $id | select(
-            ($root.panes | to_entries | map(.value.paneId == $id) | any) | not
+        $livePanes
+        | map(select(
+            ((.id as $id | ($root.panes | to_entries | map(.value.paneId == $id) | any)) | not)
+            and ((.title as $t | ($root.panes | keys | index($t)) | not))
           ))
-          | map({
-            ("pane-" + .): {
-              paneId: .,
+        | map({
+            ("pane-" + .id): {
+              paneId: .id,
               sessionId: null,
               agent: "unknown",
               projectDir: $projectDir,
@@ -2272,7 +2304,7 @@ reconcile_registry_with_live_panes() {
         | add // {}
       )
   ' \
-    --argjson live "$live_json" \
+    --argjson livePanes "$live_panes_json" \
     --arg prune "$prune" \
     --arg projectDir "$PROJECT_DIR" \
     --arg now "$now"
@@ -2363,7 +2395,7 @@ Commands:
   reply <message>
   claim [--replace]
   list [--json]
-  sync [--keep-stale|--prune]
+  sync [--keep-stale|--prune]   # --prune removes detached entries only
   gc [--force]
   log-error <agent> <message>
   register <name> [--paneId X] [--sessionId Y] [--agent A] [--cwd P] [--pid N] [--status S]
