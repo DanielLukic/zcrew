@@ -583,14 +583,13 @@ run_bwrap() {
     emit_custom_mount_args args
 
     # Environment
-    local project_bin="$workdir/.zcrew/bin"
-    local sandbox_path="$project_bin:$SANDBOX_HOME/.local/share/mise/shims:$SANDBOX_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    local sandbox_path="$SANDBOX_HOME/.local/share/mise/shims:$SANDBOX_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     args+=(
         --setenv HOME "$SANDBOX_HOME"
         --setenv USER "$HOST_USER"
         --setenv LOGNAME "$HOST_USER"
         --setenv TERM "${TERM:-xterm-256color}"
-        --setenv BX_PROJECT_BIN "$project_bin"
+        --setenv BX_PROJECT_BIN ""
         --setenv PATH "$sandbox_path"
         --chdir "$workdir"
     )

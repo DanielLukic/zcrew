@@ -533,7 +533,7 @@ test_21_run_scrubs_selected_env_and_preserves_api_keys() {
     printf '%s\n' "$out" | grep -Fxq 'OLLAMA_API_KEY=ollama-test-key' || return 1
     printf '%s\n' "$out" | grep -Fxq 'OPENAI_API_KEY=openai-test-key' || return 1
     printf '%s\n' "$out" | grep -Fxq 'ANTHROPIC_API_KEY=anthropic-test-key' || return 1
-    printf '%s\n' "$out" | grep -Eq "^PATH=$p/\.zcrew/bin:" || return 1
+    ! printf '%s\n' "$out" | grep '^PATH=' | grep -Fq "$p/.zcrew/bin" || return 1
     printf '%s\n' "$out" | grep -Eq "^PATH=.*:${HOME//\//\\/}/.local/share/mise/shims:" || return 1
 }
 
@@ -548,7 +548,7 @@ test_22_sandbox_tools_still_resolve() {
     (cd "$p" && mise trust .mise.toml >/dev/null 2>&1 && mise install >/dev/null 2>&1) || true
     out="$(bx_cmd "$p" run bash -lc 'printf "PATH=%s\n" "$PATH"; node --version >/dev/null; bun --version >/dev/null; rg --version >/dev/null; jq --version >/dev/null; for tool in mise bun rg jq node claude codex; do tool_path=$(command -v "$tool") || exit 1; printf "%s=%s\n" "$tool" "$tool_path"; done' 2>/dev/null)" || return 1
 
-    printf '%s\n' "$out" | grep -Eq "^PATH=$p/\.zcrew/bin:" || return 1
+    ! printf '%s\n' "$out" | grep '^PATH=' | grep -Fq "$p/.zcrew/bin" || return 1
     printf '%s\n' "$out" | grep -Eq "^PATH=.*:${HOME//\//\\/}/.local/share/mise/shims:" || return 1
     printf '%s\n' "$out" | grep -Eq "^node=${HOME//\//\\/}/.local/share/mise/(installs|shims)/" || return 1
     printf '%s\n' "$out" | grep -Eq "^bun=${HOME//\//\\/}/.local/share/mise/(installs|shims)/" || return 1
@@ -613,6 +613,39 @@ test_24_run_unsets_zcrew_project_dir() {
     ! printf '%s\n' "$out" | grep -q '^ZCREW_PROJECT_DIR='
 }
 
+test_25_worker_path_does_not_resolve_zcrew() {
+    local p out
+    p="$(new_project_dir test25)"
+    bx_cmd "$p" init >/dev/null 2>&1 || return 1
+    mkdir -p "$p/.zcrew/bin"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$p/.zcrew/bin/zcrew"
+    chmod +x "$p/.zcrew/bin/zcrew"
+
+    if out="$(bx_cmd "$p" run bash -lc 'command -v zcrew' 2>&1)"; then
+        printf '%s\n' "$out" >&2
+        return 1
+    fi
+}
+
+test_26_worker_absolute_zcrew_escape_hatch_still_runs() {
+    local p out
+    p="$(new_project_dir test26)"
+    bx_cmd "$p" init >/dev/null 2>&1 || return 1
+    mkdir -p "$p/.zcrew/bin"
+    cat > "$p/.zcrew/bin/zcrew" <<'MOCK_ZCREW'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--help" ]]; then
+    echo "zcrew help"
+    exit 0
+fi
+exit 1
+MOCK_ZCREW
+    chmod +x "$p/.zcrew/bin/zcrew"
+
+    out="$(bx_cmd "$p" run "$p/.zcrew/bin/zcrew" --help)" || return 1
+    [[ "$out" == "zcrew help" ]]
+}
+
 
 main() {
     mkdir -p "$BASE_PROJECT_ROOT"
@@ -647,6 +680,8 @@ main() {
     run_test "22) key sandbox tools still resolve inside bx" test_22_sandbox_tools_still_resolve
     run_test "23) symlinked standard mount resolves target before bind" test_23_symlinked_standard_mount_resolves_target
     run_test "24) bx run unsets ZCREW_PROJECT_DIR from host env" test_24_run_unsets_zcrew_project_dir
+    run_test "25) worker PATH does not resolve zcrew" test_25_worker_path_does_not_resolve_zcrew
+    run_test "26) worker absolute zcrew escape hatch still runs" test_26_worker_absolute_zcrew_escape_hatch_still_runs
 
     echo ""
     echo "Total: $PASS_COUNT PASS, $FAIL_COUNT FAIL"
