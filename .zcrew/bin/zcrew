@@ -2254,7 +2254,7 @@ reconcile_registry_with_live_panes() {
 
   # Three things at once:
   # 1) Rebind registered entries by pane title (survives mux restart),
-  #    or mark alive if paneId still live, or detached if gone.
+  #    or detach if no title matches. Pane IDs are a cache, not identity.
   # 2) Prune only detached entries when --prune.
   # 3) Auto-register live panes that aren't in the registry as pane-<id>.
   registry_write_jq '
@@ -2262,15 +2262,11 @@ reconcile_registry_with_live_panes() {
     | .panes = (.panes // {})
     # Build liveByTitle (first match wins on title collision)
     | ($livePanes | reduce .[] as $p ({}; if has($p.title) then . else .[$p.title] = $p.id end)) as $liveByTitle
-    | ($livePanes | map(.id)) as $liveIds
-    # Step 1: rebind by title, mark alive by paneId, or detached
+    # Step 1: rebind by title, or detach
     | .panes |= with_entries(
         if $liveByTitle[(.key)] != null then
           .value.paneId = $liveByTitle[(.key)]
           | .value.status = "alive"
-          | .value.lastSeen = ($now | tonumber)
-        elif ((.value.paneId // "") as $id | $liveIds | index($id)) != null then
-          .value.status = "alive"
           | .value.lastSeen = ($now | tonumber)
         else
           .value.status = "detached"

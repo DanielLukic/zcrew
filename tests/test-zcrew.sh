@@ -1080,7 +1080,7 @@ test_6_sync_prune_with_mocked_zellij() {
 
   (
     cd "$d" || exit 1
-    env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_ZELLIJ_LIST_OUTPUT='terminal_123' "$ZCREW_BIN" sync --prune >/dev/null 2>&1
+    env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_ZELLIJ_LIST_OUTPUT=$'PANE_ID  TYPE  TITLE\nterminal_123  terminal  live' "$ZCREW_BIN" sync --prune >/dev/null 2>&1
   ) || return 1
 
   jq -e '.panes | has("live") and (has("stale")|not)' "$d/.zcrew/registry.json" >/dev/null
@@ -1459,7 +1459,7 @@ test_10_sync_no_prune_marks_stale_not_delete() {
 
   (
     cd "$d" || exit 1
-    env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_ZELLIJ_LIST_OUTPUT='terminal_123' "$ZCREW_BIN" sync --keep-stale >/dev/null 2>&1
+    env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_ZELLIJ_LIST_OUTPUT=$'PANE_ID  TYPE  TITLE\nterminal_123  terminal  live' "$ZCREW_BIN" sync --keep-stale >/dev/null 2>&1
   ) || return 1
 
   jq -e '.panes | has("stale") and has("live")' "$d/.zcrew/registry.json" >/dev/null || return 1
@@ -1509,7 +1509,7 @@ test_11b_spawn_duplicate_name_fails_before_new_pane() {
   if out="$(
     cd "$d" || exit 1
     PATH="$mockbin:$PATH" MOCK_ZELLIJ_ARGS_FILE="$args_file" \
-      MOCK_ZELLIJ_LIST_OUTPUT='terminal_123' ZELLIJ_SESSION_NAME='test-session' \
+      MOCK_ZELLIJ_LIST_OUTPUT=$'PANE_ID  TYPE  TITLE\nterminal_123  terminal  buddy' ZELLIJ_SESSION_NAME='test-session' \
       "$ZCREW_BIN" spawn claude buddy 2>&1
   )"; then
     return 1
@@ -1737,7 +1737,7 @@ test_11i_spawn_does_not_churn_when_live_main_exists() {
   (
     cd "$d" || exit 1
     env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_ZELLIJ_ARGS_FILE="$args_file" \
-      MOCK_ZELLIJ_LIST_OUTPUT=$'terminal_50\nterminal_42' MOCK_ZELLIJ_NEW_PANE_OUTPUT='terminal_560' \
+      MOCK_ZELLIJ_LIST_OUTPUT=$'PANE_ID  TYPE  TITLE\nterminal_50  terminal  main\nterminal_42  terminal  pane-42' MOCK_ZELLIJ_NEW_PANE_OUTPUT='terminal_560' \
       ZELLIJ_SESSION_NAME='test-session' ZELLIJ_PANE_ID=42 "$ZCREW_BIN" spawn claude extra >/dev/null 2>&1
   ) || return 1
   after="$(jq -c '.panes.main' "$d/.zcrew/registry.json")" || return 1
@@ -3041,6 +3041,47 @@ MOCK
     "$ZCREW_BIN" sync --keep-stale >/dev/null 2>&1 || return 1
 
   jq -e '.panes.spot.paneId == "31" and .panes.spot.agent == "aider" and .panes.spot.status == "alive"' "$d/.zcrew/registry.json" >/dev/null || return 1
+}
+
+test_691f_title_identity_prevents_pane_id_collision() {
+  local d mockbin args_file out
+  d="$(new_test_dir 691f)"
+  mockbin="$d/mock-bin"
+  args_file="$d/tell-args.txt"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  jq --arg cwd "$d" '
+    .panes = {
+      alice: {paneId:"5", sessionId:"s5", agent:"claude", projectDir:$cwd, cwd:$cwd, pid:5, lastSeen:1, status:"alive"},
+      bob: {paneId:"5", sessionId:"s5", agent:"claude", projectDir:$cwd, cwd:$cwd, pid:5, lastSeen:1, status:"alive"}
+    }
+  ' "$d/.zcrew/registry.json" > "$d/.zcrew/registry.json.tmp" || return 1
+  mv "$d/.zcrew/registry.json.tmp" "$d/.zcrew/registry.json"
+  seed_local_lib_fixture "$d"
+  make_mock_tell "$d/.zcrew/lib/tell" "$args_file"
+
+  mkdir -p "$mockbin"
+  cat > "$mockbin/zellij" <<'MOCK'
+#!/usr/bin/env bash
+case "$*" in
+  *list-sessions*) echo "test-session" ;;
+  *list-panes*) printf 'PANE_ID  TYPE  TITLE\nterminal_5  terminal  alice\nterminal_99  terminal  main\n' ;;
+  *) exit 0 ;;
+esac
+MOCK
+  chmod +x "$mockbin/zellij"
+
+  out="$(cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_TELL_ARGS_FILE="$args_file" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=99 \
+    "$ZCREW_BIN" send alice "test" 2>&1)" || { printf '%s\n' "$out"; return 1; }
+
+  ! printf '%s\n' "$out" | grep -Fq "cannot send to self" || return 1
+  grep -Fq "5 test" "$args_file" || return 1
+  jq -e '
+    .panes.alice.paneId == "5"
+    and .panes.alice.status == "alive"
+    and .panes.bob.paneId == "5"
+    and .panes.bob.status == "detached"
+  ' "$d/.zcrew/registry.json" >/dev/null
 }
 
 test_25_skill_passthrough_forwards_arguments() {
@@ -5829,6 +5870,7 @@ main() {
   run_test "691c) default sync marks not prunes" test_691c_default_sync_marks_not_prunes
   run_test "691d) send to detached shows respawn hint" test_691d_send_to_detached_shows_hint
   run_test "691e) rebind preserves agent field" test_691e_rebind_preserves_agent
+  run_test "691f) title identity prevents pane id collision" test_691f_title_identity_prevents_pane_id_collision
   run_test "25) zpanes and zsync skills forward \$ARGUMENTS" test_25_skill_passthrough_forwards_arguments
   run_test "26) auto-sync overhead stays under 100ms" test_26_auto_sync_timing_under_100ms
   run_test "27) install writes managed .bx and .zcrew gitignores" test_27_install_writes_managed_gitignores
