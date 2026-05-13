@@ -15,7 +15,7 @@ Starts a new named pane running `claude`, `codex`, or `pi`. Optional `--model` p
 Sends a message to a registered pane by name. `--compact` injects `/compact` before delivery — use when starting a new task on an existing agent.
 
 `zcrew reply <message>`
-For worker panes only. Sends a result, finding, blocker, or question back to `main`.
+**Internal — adapters only.** Workers must NOT call this directly; the auto-reply adapter fires it automatically on turn completion. Manual invocation causes a double-fire.
 
 `zcrew close <name>`
 Closes a registered pane and unregisters it.
@@ -44,7 +44,9 @@ Each agent type has exactly one reply mechanism — use only that one.
 
 The orchestrator (host main) uses the MCP tools `zcrew_send` and `zcrew_list` from the project-root `.mcp.json`, with `Bash(zcrew <subcommand> ...)` for spawn / close / rename / sync / claim.
 
-Workers have NO zcrew tools exposed — replies forward automatically for all three agent types. Manual `Bash(zcrew reply ...)` is still possible but unnecessary in normal flows.
+Workers have NO zcrew tools exposed — replies forward automatically for all three agent types.
+
+**DO NOT call `zcrew reply` manually from worker shells.** The auto-reply adapter (SessionStop hook / app-server adapter / `agent_end` handler) fires on every turn completion and forwards your last assistant message to main. A manual `Bash(zcrew reply ...)` call PLUS the auto-fire = two messages delivered to main for the same turn (double-fire). Just write your result and stop — the adapter handles delivery.
 
 Workers also export `AI_KIND` (`claude`, `codex`, `pi`) so worker-side tooling can identify the active agent type without probing process names.
 
