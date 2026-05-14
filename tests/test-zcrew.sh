@@ -10,6 +10,11 @@ TEST_ROOT="$TMP_BASE/zcrew-tests-$$"
 PASS_COUNT=0
 FAIL_COUNT=0
 
+# Scrub multiplexer/project-dir env inherited from the user's shell.
+# Tests that need these set their own explicit fake values.
+unset ZCREW_PROJECT_DIR ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID ZELLIJ_TAB_NAME ZELLIJ_SESSION_ID
+unset TMUX TMUX_PANE BX_INSIDE
+
 cleanup() {
   local pid_file pid
   shopt -s nullglob
@@ -40,7 +45,11 @@ zcrew_cmd() {
   shift
   (
     cd "$d" || exit 1
-    env -u BX_INSIDE ZCREW_AUTO_SYNC=0 "$ZCREW_BIN" "$@"
+    env -u BX_INSIDE \
+        -u ZCREW_PROJECT_DIR \
+        -u ZELLIJ_SESSION_NAME -u ZELLIJ_PANE_ID -u ZELLIJ_TAB_NAME -u ZELLIJ_SESSION_ID \
+        -u TMUX -u TMUX_PANE \
+        ZCREW_AUTO_SYNC=0 "$ZCREW_BIN" "$@"
   )
 }
 
@@ -49,7 +58,11 @@ dryrun_install_cmd() {
   shift
   (
     cd "$d" || exit 1
-    env -u BX_INSIDE ZCREW_AUTO_SYNC=0 "$ZCREW_BIN" install "$@"
+    env -u BX_INSIDE \
+        -u ZCREW_PROJECT_DIR \
+        -u ZELLIJ_SESSION_NAME -u ZELLIJ_PANE_ID -u ZELLIJ_TAB_NAME -u ZELLIJ_SESSION_ID \
+        -u TMUX -u TMUX_PANE \
+        ZCREW_AUTO_SYNC=0 "$ZCREW_BIN" install "$@"
   )
 }
 
@@ -1080,7 +1093,7 @@ test_6_sync_prune_with_mocked_zellij() {
 
   (
     cd "$d" || exit 1
-    env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_ZELLIJ_LIST_OUTPUT=$'PANE_ID  TYPE  TITLE\nterminal_123  terminal  live' "$ZCREW_BIN" sync --prune >/dev/null 2>&1
+    env -u BX_INSIDE PATH="$mockbin:$PATH" ZELLIJ_SESSION_NAME=test-session MOCK_ZELLIJ_LIST_OUTPUT=$'PANE_ID  TYPE  TITLE\nterminal_123  terminal  live' "$ZCREW_BIN" sync --prune >/dev/null 2>&1
   ) || return 1
 
   jq -e '.panes | has("live") and (has("stale")|not)' "$d/.zcrew/registry.json" >/dev/null
@@ -1115,7 +1128,7 @@ test_6c_sync_prune_empty_live_set_warns_and_preserves_registry() {
 
   out="$(
     cd "$d" || exit 1
-    env -u BX_INSIDE PATH="$mockbin:$PATH" "$ZCREW_BIN" sync --prune 2>&1
+    env -u BX_INSIDE PATH="$mockbin:$PATH" ZELLIJ_SESSION_NAME=test-session "$ZCREW_BIN" sync --prune 2>&1
   )" || return 1
 
   jq -e '.panes.claudio.paneId == "11"' "$d/.zcrew/registry.json" >/dev/null || return 1
@@ -1134,7 +1147,7 @@ test_6d_sync_prune_preserves_named_aliases_for_live_panes() {
 
   (
     cd "$d" || exit 1
-    env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_ZELLIJ_LIST_OUTPUT=$'terminal_11\nterminal_12' "$ZCREW_BIN" sync >/dev/null 2>&1
+    env -u BX_INSIDE PATH="$mockbin:$PATH" ZELLIJ_SESSION_NAME=test-session MOCK_ZELLIJ_LIST_OUTPUT=$'terminal_11\nterminal_12' "$ZCREW_BIN" sync >/dev/null 2>&1
   ) || return 1
 
   jq -e '
@@ -1459,7 +1472,7 @@ test_10_sync_no_prune_marks_stale_not_delete() {
 
   (
     cd "$d" || exit 1
-    env -u BX_INSIDE PATH="$mockbin:$PATH" MOCK_ZELLIJ_LIST_OUTPUT=$'PANE_ID  TYPE  TITLE\nterminal_123  terminal  live' "$ZCREW_BIN" sync --keep-stale >/dev/null 2>&1
+    env -u BX_INSIDE PATH="$mockbin:$PATH" ZELLIJ_SESSION_NAME=test-session MOCK_ZELLIJ_LIST_OUTPUT=$'PANE_ID  TYPE  TITLE\nterminal_123  terminal  live' "$ZCREW_BIN" sync --keep-stale >/dev/null 2>&1
   ) || return 1
 
   jq -e '.panes | has("stale") and has("live")' "$d/.zcrew/registry.json" >/dev/null || return 1
@@ -2848,7 +2861,7 @@ test_21_list_auto_sync_marks_detached_not_prune() {
 
   out="$(
     cd "$d" || exit 1
-    env -u BX_INSIDE ZCREW_AUTO_SYNC=1 PATH="$mockbin:$PATH" MOCK_ZELLIJ_LIST_OUTPUT='terminal_123' "$ZCREW_BIN" list --json
+    env -u BX_INSIDE ZCREW_AUTO_SYNC=1 PATH="$mockbin:$PATH" ZELLIJ_SESSION_NAME=test-session MOCK_ZELLIJ_LIST_OUTPUT='terminal_123' "$ZCREW_BIN" list --json
   )" || return 1
 
   # Default sync marks detached, does not prune
@@ -2905,7 +2918,7 @@ test_24_sync_keep_stale_preserves_entries() {
 
   out="$(
     cd "$d" || exit 1
-    env -u BX_INSIDE PATH="$mockbin:$PATH" "$ZCREW_BIN" sync --keep-stale
+    env -u BX_INSIDE PATH="$mockbin:$PATH" ZELLIJ_SESSION_NAME=test-session "$ZCREW_BIN" sync --keep-stale
   )" || return 1
 
   [[ "$out" == "synced" ]] || return 1
@@ -3100,14 +3113,14 @@ test_26_auto_sync_timing_under_100ms() {
 
   (
     cd "$d" || exit 1
-    ZCREW_AUTO_SYNC=1 PATH="$mockbin:$PATH" "$ZCREW_BIN" list --json >/dev/null
+    ZCREW_AUTO_SYNC=1 PATH="$mockbin:$PATH" ZELLIJ_SESSION_NAME=test-session "$ZCREW_BIN" list --json >/dev/null
   ) || return 1
 
   for _ in 1 2 3; do
     start_ms="$(date +%s%3N)"
     (
       cd "$d" || exit 1
-      ZCREW_AUTO_SYNC=1 PATH="$mockbin:$PATH" "$ZCREW_BIN" list --json >/dev/null
+      ZCREW_AUTO_SYNC=1 PATH="$mockbin:$PATH" ZELLIJ_SESSION_NAME=test-session "$ZCREW_BIN" list --json >/dev/null
     ) || return 1
     end_ms="$(date +%s%3N)"
     samples+=("$((end_ms - start_ms))")
@@ -4116,6 +4129,7 @@ test_45_install_self_install_no_crash() {
   d="$(new_test_dir 45)"
   fixture="$d/zcrew-fixture"
   cp -r "$REPO_ROOT" "$fixture" || return 1
+  rm -rf "$fixture/.git"   # worktree .git pointer would resolve to live repo
   rm -rf "$fixture/.bx"
   find "$fixture/.zcrew" -mindepth 1 -maxdepth 1 ! -name bin ! -name lib -exec rm -rf {} + || return 1
   out=$(
@@ -4141,11 +4155,11 @@ test_46_resolve_sender_name_readonly_is_pure() {
 
   mapped=$(
     cd "$d" || exit 1
-    env -u BX_INSIDE ZCREW_AUTO_SYNC=0 ZELLIJ_PANE_ID=42 bash -c 'set -euo pipefail; source "$1"; resolve_sender_name_readonly' bash "$lib_copy"
+    env -u BX_INSIDE ZCREW_AUTO_SYNC=0 ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=42 bash -c 'set -euo pipefail; source "$1"; resolve_sender_name_readonly' bash "$lib_copy"
   ) || return 1
   unmapped=$(
     cd "$d" || exit 1
-    env -u BX_INSIDE ZCREW_AUTO_SYNC=0 ZELLIJ_PANE_ID=99 bash -c 'set -euo pipefail; source "$1"; resolve_sender_name_readonly' bash "$lib_copy"
+    env -u BX_INSIDE ZCREW_AUTO_SYNC=0 ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=99 bash -c 'set -euo pipefail; source "$1"; resolve_sender_name_readonly' bash "$lib_copy"
   ) || return 1
   after="$(sha256sum "$d/.zcrew/registry.json")" || return 1
 
@@ -4447,6 +4461,7 @@ test_69_install_keep_ignored_for_source_equals_target() {
   d="$(new_test_dir 69)"
   fixture="$d/zcrew-fixture"
   cp -r "$REPO_ROOT" "$fixture" || return 1
+  rm -rf "$fixture/.git"   # worktree .git pointer would resolve to live repo
   rm -rf "$fixture/.bx"
   find "$fixture/.zcrew" -mindepth 1 -maxdepth 1 ! -name bin ! -name lib -exec rm -rf {} + || return 1
 
@@ -5180,7 +5195,7 @@ test_86_gc_force_ignores_live_filter_but_respects_freshness() {
   printf '%s\n' "$new_starttime" > "$new_dir/outer.starttime"
   touch -d '2 minutes ago' "$old_dir"
 
-  (cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" "$ZCREW_BIN" gc --force >/dev/null 2>&1) || { kill "$old_pid" "$new_pid" 2>/dev/null; return 1; }
+  (cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" ZELLIJ_SESSION_NAME=test-session "$ZCREW_BIN" gc --force >/dev/null 2>&1) || { kill "$old_pid" "$new_pid" 2>/dev/null; return 1; }
 
   if kill -0 "$old_pid" 2>/dev/null; then kill "$old_pid" "$new_pid" 2>/dev/null; return 1; fi
   if ! kill -0 "$new_pid" 2>/dev/null; then kill "$new_pid" 2>/dev/null; return 1; fi

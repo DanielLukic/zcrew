@@ -1698,8 +1698,9 @@ cmd_rename() {
     --arg old "$old" \
     --arg new "$new"
   # Best-effort: rename the live pane title when a multiplexer session exists.
+  # Subshell contains exit 1 from _mx_require_backend when no session is active.
   if [[ -n "$pane_id" ]]; then
-    mx_rename_pane "$pane_id" "$new" >/dev/null 2>&1 || true
+    ( mx_rename_pane "$pane_id" "$new" ) >/dev/null 2>&1 || true
   fi
   echo "renamed: $old -> $new"
 }

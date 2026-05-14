@@ -1,0 +1,236 @@
+#!/usr/bin/env bash
+# Real-multiplexer integration tests using ephemeral private sessions.
+# Each backend is gated behind an availability probe and skips cleanly
+# when headless or unavailable — never hangs.
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+ZCREW_BIN="$REPO_ROOT/.zcrew/bin/zcrew"
+
+PASS_COUNT=0
+FAIL_COUNT=0
+SKIP_COUNT=0
+
+pass()  { echo "PASS: $1"; (( PASS_COUNT++ )); }
+fail()  { echo "FAIL: $1"; (( FAIL_COUNT++ )); }
+skip()  { echo "SKIP: $1"; (( SKIP_COUNT++ )); }
+
+# ── tmux probe ───────────────────────────────────────────────────────────────
+TMUX_SOCK=""
+TMUX_SESSION=""
+TMUX_AVAILABLE=0
+
+tmux_probe() {
+  command -v tmux >/dev/null 2>&1 || return 1
+  TMUX_SOCK="/tmp/zcrew-test-tmux-$$"
+  TMUX_SESSION="zcrew-test-$$"
+  tmux -S "$TMUX_SOCK" new-session -d -s "$TMUX_SESSION" 2>/dev/null || return 1
+  TMUX_AVAILABLE=1
+}
+
+tmux_teardown() {
+  [[ "$TMUX_AVAILABLE" -eq 0 ]] && return
+  tmux -S "$TMUX_SOCK" kill-server 2>/dev/null || true
+  rm -f "$TMUX_SOCK"
+}
+
+# ── zellij probe ─────────────────────────────────────────────────────────────
+ZELLIJ_AVAILABLE=0
+
+zellij_probe() {
+  command -v zellij >/dev/null 2>&1 || return 1
+  timeout 5 zellij list-sessions >/dev/null 2>&1 || return 1
+  ZELLIJ_AVAILABLE=1
+}
+
+cleanup() {
+  tmux_teardown
+}
+trap cleanup EXIT
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+zcrew_in() {
+  local dir="$1"; shift
+  (
+    cd "$dir"
+    env -u BX_INSIDE \
+        -u ZCREW_PROJECT_DIR \
+        -u ZELLIJ_SESSION_NAME -u ZELLIJ_PANE_ID -u ZELLIJ_TAB_NAME -u ZELLIJ_SESSION_ID \
+        -u TMUX -u TMUX_PANE \
+        ZCREW_AUTO_SYNC=0 "$ZCREW_BIN" "$@"
+  )
+}
+
+# ── tmux tests ───────────────────────────────────────────────────────────────
+
+# tmux-int-a: ephemeral session is visible in tmux list-sessions
+test_tmux_int_a_session_name() {
+  local found
+  found="$(tmux -S "$TMUX_SOCK" list-sessions -F '#{session_name}' 2>/dev/null | grep -Fx "$TMUX_SESSION" || true)"
+  [[ "$found" == "$TMUX_SESSION" ]]
+}
+
+# tmux-int-b: list panes returns at least one
+test_tmux_int_b_list_panes() {
+  local count
+  count="$(tmux -S "$TMUX_SOCK" list-panes -t "$TMUX_SESSION" 2>/dev/null | wc -l)"
+  (( count >= 1 ))
+}
+
+# tmux-int-c: spawn a pane and verify it appears in pane list
+test_tmux_int_c_pane_spawn_visible() {
+  local pane_count_before pane_count_after new_pane_id
+  pane_count_before="$(tmux -S "$TMUX_SOCK" list-panes -a 2>/dev/null | wc -l)"
+
+  new_pane_id="$(
+    tmux -S "$TMUX_SOCK" split-window -d -P -F '#{pane_id}' \
+      -t "$TMUX_SESSION" -- bash -c 'sleep 5' 2>/dev/null || true
+  )"
+  new_pane_id="${new_pane_id#%}"
+
+  pane_count_after="$(tmux -S "$TMUX_SOCK" list-panes -a 2>/dev/null | wc -l)"
+  [[ -n "$new_pane_id" ]] && tmux -S "$TMUX_SOCK" kill-pane -t "%$new_pane_id" 2>/dev/null || true
+
+  (( pane_count_after > pane_count_before ))
+}
+
+# tmux-int-d: rename a pane via tmux select-pane -T
+test_tmux_int_d_pane_rename() {
+  local pane_id title_result
+  pane_id="$(tmux -S "$TMUX_SOCK" list-panes -t "$TMUX_SESSION" -F '#{pane_id}' 2>/dev/null | head -1 || true)"
+  pane_id="${pane_id#%}"
+  [[ -n "$pane_id" ]] || return 1
+
+  tmux -S "$TMUX_SOCK" select-pane -t "%$pane_id" -T "zcrew-test-title" 2>/dev/null || return 1
+  title_result="$(tmux -S "$TMUX_SOCK" display-message -p -t "%$pane_id" '#{pane_title}' 2>/dev/null || true)"
+  [[ "$title_result" == "zcrew-test-title" ]]
+}
+
+# tmux-int-e: zcrew init + register round-trip inside ephemeral session
+test_tmux_int_e_init_register_roundtrip() {
+  local tmpdir out pane_id
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' RETURN
+
+  pane_id="$(tmux -S "$TMUX_SOCK" list-panes -t "$TMUX_SESSION" -F '#{pane_id}' 2>/dev/null | head -1 || true)"
+  pane_id="${pane_id#%}"
+  [[ -n "$pane_id" ]] || return 1
+
+  zcrew_in "$tmpdir" init >/dev/null 2>&1 || return 1
+  zcrew_in "$tmpdir" register "test-worker" \
+    --paneId "$pane_id" --sessionId "$TMUX_SESSION" \
+    --agent claude --cwd "$tmpdir" --pid $$ --status alive \
+    >/dev/null 2>&1 || return 1
+
+  out="$(zcrew_in "$tmpdir" list 2>&1)" || return 1
+  printf '%s\n' "$out" | grep -Fq "test-worker"
+}
+
+# tmux-int-f: zcrew list shows registered pane
+test_tmux_int_f_list_shows_pane() {
+  local tmpdir out pane_id
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' RETURN
+
+  pane_id="$(tmux -S "$TMUX_SOCK" list-panes -t "$TMUX_SESSION" -F '#{pane_id}' 2>/dev/null | head -1 || true)"
+  pane_id="${pane_id#%}"
+  [[ -n "$pane_id" ]] || return 1
+
+  zcrew_in "$tmpdir" init >/dev/null 2>&1 || return 1
+  zcrew_in "$tmpdir" register "monitor" \
+    --paneId "$pane_id" --sessionId "$TMUX_SESSION" \
+    --agent claude --cwd "$tmpdir" --pid $$ --status alive \
+    >/dev/null 2>&1 || return 1
+
+  out="$(zcrew_in "$tmpdir" list 2>&1)"
+  printf '%s\n' "$out" | grep -Fq "monitor"
+}
+
+# tmux-int-g: zcrew does NOT write to live REPO_ROOT audit.log
+test_tmux_int_g_no_live_audit_contamination() {
+  local tmpdir live_audit before_hash after_hash pane_id
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' RETURN
+
+  live_audit="$REPO_ROOT/.zcrew/audit.log"
+  before_hash="$(sha256sum "$live_audit" 2>/dev/null | awk '{print $1}' || echo ABSENT)"
+
+  pane_id="$(tmux -S "$TMUX_SOCK" list-panes -t "$TMUX_SESSION" -F '#{pane_id}' 2>/dev/null | head -1 || true)"
+  pane_id="${pane_id#%}"
+
+  zcrew_in "$tmpdir" init >/dev/null 2>&1 || true
+  [[ -n "$pane_id" ]] && zcrew_in "$tmpdir" register "canary" \
+    --paneId "$pane_id" --sessionId "$TMUX_SESSION" \
+    --agent claude --cwd "$tmpdir" --pid $$ --status alive \
+    >/dev/null 2>&1 || true
+  zcrew_in "$tmpdir" list >/dev/null 2>&1 || true
+
+  after_hash="$(sha256sum "$live_audit" 2>/dev/null | awk '{print $1}' || echo ABSENT)"
+  [[ "$before_hash" == "$after_hash" ]]
+}
+
+# tmux-int-h: zcrew register then unregister leaves registry clean
+test_tmux_int_h_register_unregister_clean() {
+  local tmpdir out pane_id
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' RETURN
+
+  pane_id="$(tmux -S "$TMUX_SOCK" list-panes -t "$TMUX_SESSION" -F '#{pane_id}' 2>/dev/null | head -1 || true)"
+  pane_id="${pane_id#%}"
+  [[ -n "$pane_id" ]] || return 1
+
+  zcrew_in "$tmpdir" init >/dev/null 2>&1 || return 1
+  zcrew_in "$tmpdir" register "ephemeral" \
+    --paneId "$pane_id" --sessionId "$TMUX_SESSION" \
+    --agent claude --cwd "$tmpdir" --pid $$ --status alive \
+    >/dev/null 2>&1 || return 1
+
+  out="$(zcrew_in "$tmpdir" list 2>&1)"
+  printf '%s\n' "$out" | grep -Fq "ephemeral" || return 1
+
+  zcrew_in "$tmpdir" unregister "ephemeral" >/dev/null 2>&1 || return 1
+
+  out="$(zcrew_in "$tmpdir" list 2>&1)"
+  ! printf '%s\n' "$out" | grep -Fq "ephemeral"
+}
+
+# ── runner ───────────────────────────────────────────────────────────────────
+run_test() {
+  local desc="$1"
+  local fn="$2"
+  local output
+  if output="$("$fn" 2>&1)"; then
+    pass "$desc"
+  else
+    fail "$desc"
+    [[ -z "$output" ]] || printf '  %s\n' "$output"
+  fi
+}
+
+echo "==> Probing tmux..."
+if tmux_probe; then
+  echo "    tmux available (session=$TMUX_SESSION sock=$TMUX_SOCK)"
+  run_test "tmux-int-a: session name resolves" test_tmux_int_a_session_name
+  run_test "tmux-int-b: list panes returns >=1" test_tmux_int_b_list_panes
+  run_test "tmux-int-c: spawn pane visible" test_tmux_int_c_pane_spawn_visible
+  run_test "tmux-int-d: rename pane" test_tmux_int_d_pane_rename
+  run_test "tmux-int-e: init+register roundtrip" test_tmux_int_e_init_register_roundtrip
+  run_test "tmux-int-f: list shows pane" test_tmux_int_f_list_shows_pane
+  run_test "tmux-int-g: no live audit.log contamination" test_tmux_int_g_no_live_audit_contamination
+  run_test "tmux-int-h: register then unregister" test_tmux_int_h_register_unregister_clean
+else
+  skip "tmux-int-a through tmux-int-h (tmux unavailable)"
+fi
+
+echo "==> Probing zellij..."
+if zellij_probe; then
+  echo "    zellij available"
+  skip "zellij-int (no headless session support yet)"
+else
+  skip "zellij-int (zellij unavailable or headless)"
+fi
+
+echo ""
+echo "Results: $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped"
+(( FAIL_COUNT == 0 ))
