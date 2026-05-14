@@ -2260,6 +2260,8 @@ cmd_claim() {
   done
 
   # 4. Unconditional registry write: claim main.paneId = caller BEFORE any sync.
+  #    If the caller already has a registry entry (e.g. pane-42), merge its
+  #    metadata into main and delete the old key — no duplicate entries.
   _resolve_and_set_project_dir "stateful"
   [[ -d "$STATE_DIR" ]] || fail_not_initialized
   ensure_registry_files
@@ -2268,16 +2270,32 @@ cmd_claim() {
   registry_write_jq '
     .version = 1
     | .panes = (.panes // {})
-    | .panes.main = {
-        paneId: $paneId,
-        sessionId: ($sessionId // null),
-        agent: "unknown",
-        projectDir: $projectDir,
-        cwd: $cwd,
-        pid: ($pid | tonumber),
-        lastSeen: ($now | tonumber),
-        status: "alive"
-      }
+    # Find the caller'\''s existing entry (if any), preferring named keys
+    # over pane-NNN placeholders.
+    | ((.panes
+        | to_entries
+        | map(select((.value.paneId // "") == $paneId and .key != "main"))
+        | sort_by(if (.key | test("^pane-[0-9]+$")) then 1 else 0 end)
+        | .[0].value) // {
+          paneId: $paneId,
+          sessionId: ($sessionId // null),
+          agent: "unknown",
+          projectDir: $projectDir,
+          cwd: $cwd,
+          pid: ($pid | tonumber),
+          lastSeen: ($now | tonumber),
+          status: "alive"
+        }) as $entry
+    # Delete any old placeholder for this paneId.
+    | .panes |= del(.["pane-" + $paneId])
+    # Promote/upsert main with the merged entry.
+    | .panes.main = ($entry
+        | .paneId = $paneId
+        | .projectDir = (.projectDir // $projectDir)
+        | .cwd = (.cwd // $cwd)
+        | .pid = (.pid // ($pid | tonumber))
+        | .lastSeen = ($now | tonumber)
+        | .status = "alive")
   ' \
     --arg paneId "$pane_id" \
     --arg sessionId "$session" \
@@ -2313,8 +2331,9 @@ cmd_claim() {
   require_project
   mx_require_session
 
-  # 8. Fill remaining fields from any existing pane entry (merges old
-  #    metadata like agent, pid, etc.) and clean up stale placeholder.
+  # 8. Finish with claim_main_alias (mostly a no-op now — step 4 already
+  #    merged the caller's prior entry into main). Called for consistency
+  #    with the claim_main_for_send path and to pick up any edge cases.
   claim_main_alias "$replace"
 }
 

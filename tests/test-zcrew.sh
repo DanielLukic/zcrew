@@ -6026,6 +6026,33 @@ test_ci_8b_claim_retitles_foreign_main_to_pane_id_fallback() {
   jq -e '.panes.main.paneId == "1"' "$d/.zcrew/registry.json" >/dev/null || return 1
 }
 
+test_ci_9_claim_merges_caller_metadata_and_removes_old_key() {
+  local d mockbin args_file title_map out
+  d="$(new_test_dir ci-9)"
+  mockbin="$d/mock-bin"
+  args_file="$d/zellij-args.txt"
+  title_map="$d/title-map.txt"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register pane-42 --paneId 42 --sessionId s42 --agent claude --cwd "$d" --pid 42 --status alive >/dev/null 2>&1 || return 1
+  seed_local_lib_fixture "$d"
+  make_mock_zellij "$mockbin"
+
+  out="$(cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" \
+    MOCK_ZELLIJ_ARGS_FILE="$args_file" \
+    MOCK_ZELLIJ_TITLE_MAP="$title_map" \
+    MOCK_ZELLIJ_LIST_OUTPUT=$'PANE_ID  TYPE  TITLE\nterminal_42  terminal  pane-42' \
+    ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=42 \
+    ZCREW_AUTO_SYNC=0 "$ZCREW_BIN" claim 2>&1)" || return 1
+
+  # No pane-42 entry remains (dedup).
+  jq -e '(.panes | has("pane-42") | not)' "$d/.zcrew/registry.json" >/dev/null || return 1
+  # main.paneId = caller.
+  jq -e '.panes.main.paneId == "42"' "$d/.zcrew/registry.json" >/dev/null || return 1
+  # main.agent inherited from old pane-42 entry, not "unknown".
+  jq -e '.panes.main.agent == "claude"' "$d/.zcrew/registry.json" >/dev/null || return 1
+}
+
 
 main() {
   mkdir -p "$TEST_ROOT"
@@ -6299,6 +6326,7 @@ main() {
   run_test "ci-7) claim --replace accepted silently (idempotent)" test_ci_7_claim_replace_accepted_silently_idempotent
   run_test "ci-8) claim retitles foreign main to registry name before caller wins" test_ci_8_claim_retitles_foreign_main_with_registry_name
   run_test "ci-8b) claim retitles foreign main to pane-id fallback when no registry entry" test_ci_8b_claim_retitles_foreign_main_to_pane_id_fallback
+  run_test "ci-9) claim merges caller metadata and removes old key (no duplicate)" test_ci_9_claim_merges_caller_metadata_and_removes_old_key
   run_test "106) clone-mode install still materializes local tooling + skills" test_106_clone_mode_install_materializes_local_layout
 
   echo ""
