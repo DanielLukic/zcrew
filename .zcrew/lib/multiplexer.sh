@@ -199,7 +199,7 @@ mx_rename_pane() {
 mx_list_pane_ids() {
   _mx_require_backend
   case "$_MX_BACKEND" in
-    zellij) zellij action list-panes 2>/dev/null | sed -n 's/.*terminal_\([0-9][0-9]*\).*/\1/p' ;;
+    zellij) zellij action list-panes -j 2>/dev/null | jq -r '.[] | select(.is_plugin==false and .exited==false) | .id' ;;
     tmux)
       local session_name=""
       session_name="$(mx_session_name 2>/dev/null)" || return 0
@@ -219,15 +219,8 @@ mx_list_panes() {
   _mx_require_backend
   case "$_MX_BACKEND" in
     zellij)
-      zellij action list-panes 2>/dev/null |
-        awk 'NR==1 {next} $2=="terminal" {
-          sub(/^terminal_/, "", $1)
-          # Reconstruct title from field 3 onward (may contain spaces)
-          title = $3
-          for (i=4; i<=NF; i++) title = title " " $i
-          gsub(/\t/, " ", title)
-          print $1 "\t" title
-        }'
+      zellij action list-panes -j 2>/dev/null |
+        jq -r '.[] | select(.is_plugin==false and .exited==false) | "\(.id)\t\(.title | gsub("\t"; " "))"'
       ;;
     tmux)
       local session_name=""

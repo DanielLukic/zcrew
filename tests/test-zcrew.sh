@@ -766,50 +766,98 @@ case "${1:-}" in
     shift
     case "${1:-}" in
       list-panes)
-        # Backward-compat: auto-convert old-format terminal_NNN lines to full format.
-        # Apply persisted title overrides from rename-pane (if MOCK_ZELLIJ_TITLE_MAP set).
         TITLE_MAP="${MOCK_ZELLIJ_TITLE_MAP:-}"
-        if [[ "$LIST_OUTPUT" == $'PANE_ID'* ]]; then
-          if [[ -n "$TITLE_MAP" && -f "$TITLE_MAP" ]]; then
-            printf '%s\n' "$LIST_OUTPUT" | awk -v map="$TITLE_MAP" '
-              BEGIN {
-                while ((getline line < map) > 0) {
+        JSON_MODE=""
+        for arg in "$@"; do
+          if [[ "$arg" == "-j" || "$arg" == "--json" ]]; then
+            JSON_MODE=1; break
+          fi
+        done
+        if [[ -n "$JSON_MODE" ]]; then
+          # Convert LIST_OUTPUT to JSON array. Handles table format (PANE_ID...)
+          # and simple terminal_NNN lines.
+          printf '%s\n' "$LIST_OUTPUT" | awk -v title_map="$TITLE_MAP" '
+            BEGIN {
+              if (title_map != "") {
+                while ((getline line < title_map) > 0) {
                   split(line, kv, "=")
                   titles[kv[1]] = kv[2]
                 }
               }
-              NR==1 {print; next}
-              {
+            }
+            /^PANE_ID/ { table=1; next }
+            {
+              if (table) {
                 id = $1; sub(/^terminal_/, "", id)
-                if (titles[id] != "") $3 = titles[id]
-                for (i=4; i<=NF; i++) $i = ""
-                # Reconstruct: PANE_ID  TYPE  TITLE
-                gsub(/  +/, "  ")
-                print
-              }
-            '
-          else
-            printf '%s\n' "$LIST_OUTPUT"
-          fi
-        else
-          printf 'PANE_ID  TYPE  TITLE\n'
-          while IFS= read -r line; do
-            [[ -n "$line" ]] || continue
-            if [[ "$line" == terminal_* ]]; then
-              id="${line#terminal_}"
-              TITLE_OVERRIDE=""
-              if [[ -n "$TITLE_MAP" && -f "$TITLE_MAP" ]]; then
-                TITLE_OVERRIDE="$(grep "^${id}=" "$TITLE_MAP" 2>/dev/null | head -1 | cut -d= -f2- || true)"
-              fi
-              if [[ -n "$TITLE_OVERRIDE" ]]; then
-                printf '%s  terminal  %s\n' "$line" "$TITLE_OVERRIDE"
+                title = $3
+                for (i=4; i<=NF; i++) title = title " " $i
+                if (titles[id] != "") title = titles[id]
+              } else if (/^terminal_/) {
+                id = $1; sub(/^terminal_/, "", id)
+                title = "pane-" id
+                if (titles[id] != "") title = titles[id]
+              } else { next }
+              gsub(/\\/, "\\\\", title)
+              gsub(/"/, "\\\"", title)
+              printf "{\"id\":%s,\"is_plugin\":false,\"is_floating\":false,\"title\":\"%s\",\"exited\":false}\n", id, title
+            }
+          ' | (
+            first=1
+            printf '['
+            while IFS= read -r line; do
+              [[ -n "$line" ]] || continue
+              if [[ -n "$first" ]]; then
+                printf '\n  %s' "$line"
+                first=""
               else
-                printf '%s  terminal  pane-%s\n' "$line" "$id"
+                printf ',\n  %s' "$line"
               fi
+            done
+            printf '\n]\n'
+          )
+        else
+          # Plain table output (existing behaviour).
+          if [[ "$LIST_OUTPUT" == $'PANE_ID'* ]]; then
+            if [[ -n "$TITLE_MAP" && -f "$TITLE_MAP" ]]; then
+              printf '%s\n' "$LIST_OUTPUT" | awk -v map="$TITLE_MAP" '
+                BEGIN {
+                  while ((getline line < map) > 0) {
+                    split(line, kv, "=")
+                    titles[kv[1]] = kv[2]
+                  }
+                }
+                NR==1 {print; next}
+                {
+                  id = $1; sub(/^terminal_/, "", id)
+                  if (titles[id] != "") $3 = titles[id]
+                  for (i=4; i<=NF; i++) $i = ""
+                  gsub(/  +/, "  ")
+                  print
+                }
+              '
             else
-              printf '%s\n' "$line"
+              printf '%s\n' "$LIST_OUTPUT"
             fi
-          done <<< "$LIST_OUTPUT"
+          else
+            printf 'PANE_ID  TYPE  TITLE\n'
+            while IFS= read -r line; do
+              [[ -n "$line" ]] || continue
+              if [[ "$line" == terminal_* ]]; then
+                id="${line#terminal_}"
+                TITLE_OVERRIDE=""
+                if [[ -n "$TITLE_MAP" && -f "$TITLE_MAP" ]]; then
+                  TITLE_OVERRIDE="$(grep "^${id}=" "$TITLE_MAP" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+                fi
+                if [[ -n "$TITLE_OVERRIDE" ]]; then
+                  printf '%s  terminal  %s\n' "$line" "$TITLE_OVERRIDE"
+                else
+                  printf '%s  terminal  pane-%s\n' "$line" "$id"
+                fi
+              else
+                printf '%s\n' "$line"
+              fi
+            done <<< "$LIST_OUTPUT"
+          fi
         fi
         ;;
       rename-pane)
@@ -1055,7 +1103,21 @@ case "\${1:-}" in
   list-sessions) echo "$session_name" ;;
   action)
     case "\${2:-}" in
-      list-panes) printf '%s' '$list_output' ;;
+      list-panes)
+        if [[ "\${3:-}" == "-j" || "\${3:-}" == "--json" ]]; then
+          printf '%s' '$list_output' | awk '
+            /^terminal_/ {
+              id = \$1; sub(/^terminal_/, "", id)
+              printf "{\"id\":%s,\"is_plugin\":false,\"is_floating\":false,\"title\":\"pane-%s\",\"exited\":false}\n", id, id
+            }
+          ' | ( first=1; printf '['; while IFS= read -r line; do
+              [[ -n "\$line" ]] || continue
+              if [[ -n "\$first" ]]; then printf '\n  %s' "\$line"; first=""; else printf ',\n  %s' "\$line"; fi
+            done; printf '\n]\n' )
+        else
+          printf '%s' '$list_output'
+        fi
+        ;;
       *) exit 0 ;;
     esac
     ;;
@@ -1343,7 +1405,13 @@ case "${1:-}" in
   list-sessions) echo "test-session" ;;
   action)
     case "${2:-}" in
-      list-panes) echo "terminal_123" ;;
+      list-panes)
+        if [[ "${3:-}" == "-j" || "${3:-}" == "--json" ]]; then
+          echo '[{"id":123,"is_plugin":false,"is_floating":false,"title":"pane-123","exited":false}]'
+        else
+          echo 'terminal_123'
+        fi
+        ;;
       *) exit 0 ;;
     esac
     ;;
@@ -3332,7 +3400,7 @@ test_691a_title_rebind_survives_restart() {
   mkdir -p "$d/mock-bin"
   cat > "$d/mock-bin/zellij" <<'MOCK'
 #!/usr/bin/env bash
-printf 'PANE_ID  TYPE  TITLE\nterminal_23  terminal  sam\n'
+case "${3:-}" in -j|--json) echo '[{"id":23,"is_plugin":false,"is_floating":false,"title":"sam","exited":false}]' ;; *) printf 'PANE_ID  TYPE  TITLE\nterminal_23  terminal  sam\n' ;; esac
 MOCK
   chmod +x "$d/mock-bin/zellij"
 
@@ -3352,7 +3420,7 @@ test_691b_unmatched_title_becomes_detached() {
   mkdir -p "$d/mock-bin"
   cat > "$d/mock-bin/zellij" <<'MOCK'
 #!/usr/bin/env bash
-printf 'PANE_ID  TYPE  TITLE\nterminal_99  terminal  unrelated\n'
+case "${3:-}" in -j|--json) echo '[{"id":99,"is_plugin":false,"is_floating":false,"title":"unrelated","exited":false}]' ;; *) printf 'PANE_ID  TYPE  TITLE\nterminal_99  terminal  unrelated\n' ;; esac
 MOCK
   chmod +x "$d/mock-bin/zellij"
 
@@ -3372,7 +3440,7 @@ test_691c_default_sync_marks_not_prunes() {
   mkdir -p "$d/mock-bin"
   cat > "$d/mock-bin/zellij" <<'MOCK'
 #!/usr/bin/env bash
-printf 'PANE_ID  TYPE  TITLE\nterminal_99  terminal  other_title\n'
+case "${3:-}" in -j|--json) echo '[{"id":99,"is_plugin":false,"is_floating":false,"title":"other_title","exited":false}]' ;; *) printf 'PANE_ID  TYPE  TITLE\nterminal_99  terminal  other_title\n' ;; esac
 MOCK
   chmod +x "$d/mock-bin/zellij"
 
@@ -3401,7 +3469,7 @@ test_691d_send_to_detached_shows_hint() {
   mkdir -p "$mockbin"
   cat > "$mockbin/zellij" <<'MOCK'
 #!/usr/bin/env bash
-printf 'PANE_ID  TYPE  TITLE\n'
+case "${3:-}" in -j|--json) echo '[]' ;; *) printf 'PANE_ID  TYPE  TITLE\n' ;; esac
 MOCK
   chmod +x "$mockbin/zellij"
   cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" ZELLIJ_SESSION_NAME=test-session \
@@ -3415,7 +3483,14 @@ MOCK
 #!/usr/bin/env bash
 case "$*" in
   *list-sessions*) echo "test-session" ;;
-  *list-panes*) printf 'PANE_ID  TYPE  TITLE\nterminal_99  terminal  other\n' ;;
+  *list-panes*)
+    for a in "$@"; do [[ "$a" == "-j" || "$a" == "--json" ]] && json=1; done
+    if [[ -n "${json:-}" ]]; then
+      echo '[{"id":99,"is_plugin":false,"is_floating":false,"title":"other","exited":false}]'
+    else
+      printf 'PANE_ID  TYPE  TITLE\nterminal_99  terminal  other\n'
+    fi
+    ;;
   *pane-id*) echo "99" ;;
   *) exit 0 ;;
 esac
@@ -3440,7 +3515,7 @@ test_691e_rebind_preserves_agent() {
   mkdir -p "$d/mock-bin"
   cat > "$d/mock-bin/zellij" <<'MOCK'
 #!/usr/bin/env bash
-printf 'PANE_ID  TYPE  TITLE\nterminal_31  terminal  spot\n'
+case "${3:-}" in -j|--json) echo '[{"id":31,"is_plugin":false,"is_floating":false,"title":"spot","exited":false}]' ;; *) printf 'PANE_ID  TYPE  TITLE\nterminal_31  terminal  spot\n' ;; esac
 MOCK
   chmod +x "$d/mock-bin/zellij"
 
@@ -3472,7 +3547,14 @@ test_691f_title_identity_prevents_pane_id_collision() {
 #!/usr/bin/env bash
 case "$*" in
   *list-sessions*) echo "test-session" ;;
-  *list-panes*) printf 'PANE_ID  TYPE  TITLE\nterminal_5  terminal  alice\nterminal_99  terminal  main\n' ;;
+  *list-panes*)
+    for a in "$@"; do [[ "$a" == "-j" || "$a" == "--json" ]] && json=1; done
+    if [[ -n "${json:-}" ]]; then
+      echo '[{"id":5,"is_plugin":false,"is_floating":false,"title":"alice","exited":false},{"id":99,"is_plugin":false,"is_floating":false,"title":"main","exited":false}]'
+    else
+      printf 'PANE_ID  TYPE  TITLE\nterminal_5  terminal  alice\nterminal_99  terminal  main\n'
+    fi
+    ;;
   *) exit 0 ;;
 esac
 MOCK
@@ -3489,6 +3571,100 @@ MOCK
     and .panes.bob.paneId == "5"
     and .panes.bob.status == "detached"
   ' "$d/.zcrew/registry.json" >/dev/null
+}
+
+# ── TFD-704 Phase 2: floating pane reconcile ──────────────────────────
+
+# Floating zellij pane must reconcile as alive (not falsely detached).
+test_tfd704_p2a_floating_reconcile_alive() {
+  local d
+  d="$(new_test_dir tfd704-p2a)"
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  # Register a floating worker with known title
+  zcrew_cmd "$d" register floater --paneId 3 --sessionId s3 --agent claude --cwd "$d" --pid 3 --status alive >/dev/null 2>&1 || return 1
+
+  mkdir -p "$d/mock-bin"
+  cat > "$d/mock-bin/zellij" <<'MOCK'
+#!/usr/bin/env bash
+case "${3:-}" in -j|--json) echo '[{"id":3,"is_plugin":false,"is_floating":true,"title":"floater","exited":false}]' ;; *) printf 'PANE_ID  TYPE  TITLE\nterminal_3  terminal  floater\n' ;; esac
+MOCK
+  chmod +x "$d/mock-bin/zellij"
+
+  cd "$d" && env -u BX_INSIDE PATH="$d/mock-bin:$PATH" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=99 \
+    "$ZCREW_BIN" sync --keep-stale >/dev/null 2>&1 || return 1
+
+  jq -e '.panes.floater.paneId == "3" and .panes.floater.status == "alive"' "$d/.zcrew/registry.json" >/dev/null || return 1
+}
+
+# Floating pane rebind after mux restart (new paneId, same title).
+test_tfd704_p2b_floating_title_rebind() {
+  local d
+  d="$(new_test_dir tfd704-p2b)"
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register sam --paneId 10 --sessionId s10 --agent codex --cwd "$d" --pid 10 --status alive >/dev/null 2>&1 || return 1
+
+  mkdir -p "$d/mock-bin"
+  cat > "$d/mock-bin/zellij" <<'MOCK'
+#!/usr/bin/env bash
+case "${3:-}" in -j|--json) echo '[{"id":42,"is_plugin":false,"is_floating":true,"title":"sam","exited":false}]' ;; *) printf 'PANE_ID  TYPE  TITLE\nterminal_42  terminal  sam\n' ;; esac
+MOCK
+  chmod +x "$d/mock-bin/zellij"
+
+  cd "$d" && env -u BX_INSIDE PATH="$d/mock-bin:$PATH" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=99 \
+    "$ZCREW_BIN" sync --keep-stale >/dev/null 2>&1 || return 1
+
+  jq -e '.panes.sam.paneId == "42" and .panes.sam.status == "alive"' "$d/.zcrew/registry.json" >/dev/null || return 1
+}
+
+# mx_list_panes JSON includes tiled panes (regression check).
+test_tfd704_p2c_tiled_still_enumerates() {
+  local d
+  d="$(new_test_dir tfd704-p2c)"
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register tiler --paneId 0 --sessionId s0 --agent pi --cwd "$d" --pid 0 --status alive >/dev/null 2>&1 || return 1
+
+  mkdir -p "$d/mock-bin"
+  cat > "$d/mock-bin/zellij" <<'MOCK'
+#!/usr/bin/env bash
+case "${3:-}" in -j|--json) echo '[{"id":0,"is_plugin":false,"is_floating":false,"title":"tiler","exited":false}]' ;; *) printf 'PANE_ID  TYPE  TITLE\nterminal_0  terminal  tiler\n' ;; esac
+MOCK
+  chmod +x "$d/mock-bin/zellij"
+
+  cd "$d" && env -u BX_INSIDE PATH="$d/mock-bin:$PATH" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=99 \
+    "$ZCREW_BIN" sync --keep-stale >/dev/null 2>&1 || return 1
+
+  jq -e '.panes.tiler.paneId == "0" and .panes.tiler.status == "alive"' "$d/.zcrew/registry.json" >/dev/null || return 1
+}
+
+# mx_list_panes JSON skips plugins and exited panes.
+test_tfd704_p2d_exited_and_plugins_skipped() {
+  local d
+  d="$(new_test_dir tfd704-p2d)"
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register keeper --paneId 7 --sessionId s7 --agent claude --cwd "$d" --pid 7 --status alive >/dev/null 2>&1 || return 1
+
+  mkdir -p "$d/mock-bin"
+  cat > "$d/mock-bin/zellij" <<'MOCK'
+#!/usr/bin/env bash
+case "${3:-}" in -j|--json)
+  echo '[
+    {"id":0,"is_plugin":true,"is_floating":false,"title":"zellij:link","exited":false},
+    {"id":7,"is_plugin":false,"is_floating":true,"title":"keeper","exited":false},
+    {"id":8,"is_plugin":false,"is_floating":false,"title":"goner","exited":true}
+  ]'
+  ;;
+  *) printf 'PANE_ID  TYPE  TITLE\nterminal_0  plugin  zellij:link\nterminal_7  terminal  keeper\nterminal_8  terminal  goner\n' ;;
+esac
+MOCK
+  chmod +x "$d/mock-bin/zellij"
+
+  cd "$d" && env -u BX_INSIDE PATH="$d/mock-bin:$PATH" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=99 \
+    "$ZCREW_BIN" sync --keep-stale >/dev/null 2>&1 || return 1
+
+  # keeper is alive; goner (exited) and plugin are skipped — keeper stays alive
+  jq -e '.panes.keeper.paneId == "7" and .panes.keeper.status == "alive"' "$d/.zcrew/registry.json" >/dev/null || return 1
+  # No stray "goner" entry from the exited pane
+  jq -e '.panes | has("goner") | not' "$d/.zcrew/registry.json" >/dev/null || return 1
 }
 
 test_25_skill_passthrough_forwards_arguments() {
@@ -6543,6 +6719,10 @@ main() {
   run_test "691d) send to detached shows respawn hint" test_691d_send_to_detached_shows_hint
   run_test "691e) rebind preserves agent field" test_691e_rebind_preserves_agent
   run_test "691f) title identity prevents pane id collision" test_691f_title_identity_prevents_pane_id_collision
+  run_test "tfd704-p2a) floating zellij pane reconciles alive" test_tfd704_p2a_floating_reconcile_alive
+  run_test "tfd704-p2b) floating pane rebinds after mux restart" test_tfd704_p2b_floating_title_rebind
+  run_test "tfd704-p2c) tiled panes still enumerate (JSON regression)" test_tfd704_p2c_tiled_still_enumerates
+  run_test "tfd704-p2d) JSON skips plugin and exited panes" test_tfd704_p2d_exited_and_plugins_skipped
   run_test "25) zpanes and zsync skills forward \$ARGUMENTS" test_25_skill_passthrough_forwards_arguments
   run_test "26) auto-sync overhead stays under 100ms" test_26_auto_sync_timing_under_100ms
   run_test "27) install writes managed .bx and .zcrew gitignores" test_27_install_writes_managed_gitignores
