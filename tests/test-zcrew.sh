@@ -605,7 +605,7 @@ data = pathlib.Path(args_path).read_bytes()
 lines = data.splitlines(keepends=True)
 if len(lines) != 3:
     raise SystemExit(f"unexpected mock args bytes: {data!r}")
-match = re.fullmatch(br"load-buffer -b (zcrew-send-5-[0-9]+-[0-9]+) -\n", lines[0])
+match = re.fullmatch(br"load-buffer -b (zcrew-send-5-[0-9]+-[0-9]+-[0-9]+) -\n", lines[0])
 if not match:
     raise SystemExit(f"unexpected load-buffer args: {lines[0]!r}")
 buffer_name = match.group(1)

@@ -230,7 +230,7 @@ mx_send_text() {
       zellij action write 13 --pane-id "$1"
       ;;
     tmux)
-      local buffer_name="zcrew-send-$1-$$-$RANDOM"
+      local buffer_name="zcrew-send-$1-$$-$(date +%s%N)-$RANDOM"
       printf '%s' "$2" | tmux load-buffer -b "$buffer_name" -
       tmux paste-buffer -p -r -d -b "$buffer_name" -t "%$1" || {
         tmux delete-buffer -b "$buffer_name" 2>/dev/null || true
