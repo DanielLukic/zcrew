@@ -2220,6 +2220,21 @@ sparky codex gpt-5.3-codex implementer
   ! grep -Fq 'new-pane --floating' "$args_file" || return 1
 }
 
+# Malformed #@placement with trailing junk (NF>2) → skipped → backend default.
+test_tfd704_k2_placement_trailing_junk_falls_back() {
+  local d args_file
+  d="$(new_test_dir tfd704-k2)"
+  args_file="$d/zellij-args.txt"
+
+  _run_spawn_with_team_conf "$d" "#@placement pane extrajunk
+sparky codex gpt-5.3-codex implementer
+" "sparky" || return 1
+  # Must NOT pick "pane" — the trailing junk makes NF==3, so the directive
+  # is skipped and the backend default (zellij float) is used.
+  grep -Fq 'new-pane --floating' "$args_file" || return 1
+  ! grep -Fq 'new-pane --cwd' "$args_file" || return 1
+}
+
 test_tfd704_l_zellij_float_spawn_registers_pane_id() {
   local d mockbin args_file out
   d="$(new_test_dir tfd704-l)"
@@ -6455,6 +6470,7 @@ main() {
   run_test "tfd704-i) tmux pane still sets @zcrew-name" test_tfd704_i_tmux_pane_sets_zcrew_name
   run_test "tfd704-j) tmux tab does not tile (no select-layout)" test_tfd704_j_tmux_tab_no_tile
   run_test "tfd704-k) whitespace-indented #@placement still parsed" test_tfd704_k_placement_indented_with_spaces
+  run_test "tfd704-k2) #@placement with trailing junk falls back to default" test_tfd704_k2_placement_trailing_junk_falls_back
   run_test "tfd704-l) zellij float spawn registers pane id" test_tfd704_l_zellij_float_spawn_registers_pane_id
   run_test "tfd704-m) tmux tab spawn registers pane id" test_tfd704_m_tmux_tab_spawn_registers_pane_id
   run_test "12) send outside project fails hard" test_12_send_outside_project_fails_hard

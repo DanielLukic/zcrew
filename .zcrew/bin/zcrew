@@ -840,7 +840,7 @@ cmd_spawn() {
   # Defaults are backend-dependent: zellij→float, tmux→tab.
   local placement=""
   if [[ -f "${PROJECT_DIR}/.zcrew/team.conf" ]]; then
-    placement="$(awk '/^[[:space:]]*#@placement[[:space:]]/ { print $2; exit }' "${PROJECT_DIR}/.zcrew/team.conf" 2>/dev/null || true)"
+    placement="$(awk '/^[[:space:]]*#@placement[[:space:]]/ && NF==2 { print $2; exit }' "${PROJECT_DIR}/.zcrew/team.conf" 2>/dev/null || true)"
   fi
 
   # STEP 1: Minimal spawn — just open a new pane. No bx, no wrapper, no
