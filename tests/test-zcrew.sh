@@ -2277,7 +2277,10 @@ test_18n_dryrun_plan_keeps_runtime_state() {
   out="$(dryrun_install_cmd "$TEST_ROOT" "$d" --dry-run 2>&1)" || return 1
   keep="$(printf '%s\n' "$out" | plan_section KEEP)" || return 1
   printf '%s\n' "$keep" | grep -Fqx '  .zcrew/registry.json (preserve runtime state)' || return 1
-  printf '%s\n' "$keep" | grep -Fqx '  .bx/home/ (preserve sandbox home and runtime state)'
+  printf '%s\n' "$keep" | grep -Fqx '  .bx/home/ (preserve sandbox home and runtime state)' || return 1
+  printf '%s\n' "$keep" | grep -Fqx '  .bx/home/.pi/agent/mcp.json (strip zcrew MCP entry if present)' || return 1
+  printf '%s\n' "$keep" | grep -Fqx '  .bx/home/.codex/config.toml (strip [mcp_servers.zcrew] block if present)' || return 1
+  printf '%s\n' "$keep" | grep -Fqx '  .bx/home/.gitconfig (create if absent; overwrite if zcrew-managed)'
 }
 
 test_18o_dryrun_plan_keeps_mixed_content() {
@@ -2373,6 +2376,39 @@ test_18t_dryrun_path_owned_premarker_lib_file_is_replace_not_skip() {
   skip="$(printf '%s\n' "$out" | plan_section SKIP)" || return 1
   printf '%s\n' "$replace" | grep -Fq '  .zcrew/lib/mcp_server.py (overwrite, managed-modified' || return 1
   ! printf '%s\n' "$skip" | grep -Fq '.zcrew/lib/mcp_server.py'
+}
+
+test_18ta_dryrun_keep_reports_compat_symlinks() {
+  local d out replace
+  d="$(new_test_dir 18ta)"
+  mkdir -p "$d"
+
+  out="$(dryrun_install_cmd "$TEST_ROOT" "$d" --keep --dry-run 2>&1)" || return 1
+  replace="$(printf '%s\n' "$out" | plan_section REPLACE)" || return 1
+  printf '%s\n' "$replace" | grep -Fq 'bin/zcrew (create symlink' || return 1
+  printf '%s\n' "$replace" | grep -Fq 'bin/bx (create symlink' || return 1
+  printf '%s\n' "$replace" | grep -Fq 'lib/zcrew/tell (create symlink'
+}
+
+test_18tb_dryrun_claude_cleanup_reports_retired_hook() {
+  local d out replace
+  d="$(new_test_dir 18tb)"
+  mkdir -p "$d/.claude/hooks"
+  touch "$d/.claude/hooks/zcrew-register.sh"
+
+  out="$(dryrun_install_cmd "$TEST_ROOT" "$d" --dry-run 2>&1)" || return 1
+  replace="$(printf '%s\n' "$out" | plan_section REPLACE)" || return 1
+  printf '%s\n' "$replace" | grep -Fqx '  .claude/hooks/zcrew-register.sh (remove retired hook)'
+}
+
+test_18tc_dryrun_no_claude_cleanup_on_clean_target() {
+  local d out replace
+  d="$(new_test_dir 18tc)"
+  mkdir -p "$d"
+
+  out="$(dryrun_install_cmd "$TEST_ROOT" "$d" --dry-run 2>&1)" || return 1
+  replace="$(printf '%s\n' "$out" | plan_section REPLACE)" || return 1
+  ! printf '%s\n' "$replace" | grep -Fq '.claude/hooks/zcrew-register.sh'
 }
 
 test_18u_dryrun_no_stale_paths_exit_zero() {
@@ -5849,6 +5885,9 @@ main() {
   run_test "18r) dry-run distinguishes pristine vs modified managed files" test_18r_dryrun_classifies_pristine_vs_modified
   run_test "18s) dry-run classifies absent managed files as create" test_18s_dryrun_classifies_absent_as_create
   run_test "18t) dry-run treats pre-marker lib files as replace on zcrew-owned paths" test_18t_dryrun_path_owned_premarker_lib_file_is_replace_not_skip
+  run_test "18ta) dry-run --keep reports compat symlinks in plan" test_18ta_dryrun_keep_reports_compat_symlinks
+  run_test "18tb) dry-run reports retired .claude/hooks/zcrew-register.sh when present" test_18tb_dryrun_claude_cleanup_reports_retired_hook
+  run_test "18tc) dry-run omits .claude cleanup on clean target" test_18tc_dryrun_no_claude_cleanup_on_clean_target
   run_test "18u) dry-run with clean install has no stale paths and exits 0" test_18u_dryrun_no_stale_paths_exit_zero
   run_test "18v) dry-run reports stale .mcp.json and exits 1" test_18v_dryrun_stale_mcp_json_reported_exit_one
   run_test "18w) dry-run reports stale .claude/settings.local.json and exits 1" test_18w_dryrun_stale_claude_settings_reported_exit_one

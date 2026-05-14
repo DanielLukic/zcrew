@@ -1343,6 +1343,7 @@ print_install_plan() {
   local src="$1"
   local target="$2"
   local target_abs="$3"
+  local keep_compat="${4:-false}"
   local -a PLAN_REPLACE=()
   local -a PLAN_KEEP=()
   local -a PLAN_SKIP=()
@@ -1385,16 +1386,59 @@ print_install_plan() {
     PLAN_REPLACE+=("CLAUDE.md (create symlink to AGENTS.md)")
   fi
 
+  # .claude cleanup — retired hooks from older zcrew versions
+  if [[ -f "$target_abs/.claude/hooks/zcrew-register.sh" ]]; then
+    PLAN_REPLACE+=(".claude/hooks/zcrew-register.sh (remove retired hook)")
+  fi
+  if [[ -f "$target_abs/.claude/settings.json" ]] && \
+     jq -e '(.hooks.SessionStart // []) | length > 0' "$target_abs/.claude/settings.json" >/dev/null 2>&1; then
+    PLAN_REPLACE+=(".claude/settings.json (remove retired SessionStart hook)")
+  fi
+
   print_install_plan_tree "$src/.agents/skills/zcrew" "$target_abs/.agents/skills/zcrew" 0
-  print_install_plan_tree "$src/.claude/skills" "$target_abs/.claude/skills" 0
-  print_install_plan_tree "$src/.pi/skills" "$target_abs/.pi/skills" 0
+  local skill
+  for skill in zspawn zsend zpanes zsync zname zclose zcrew; do
+    print_install_plan_tree "$src/.claude/skills/$skill" "$target_abs/.claude/skills/$skill" 0
+  done
+  for skill in zspawn zsend zpanes zsync zname zclose zcrew; do
+    print_install_plan_tree "$src/.pi/skills/$skill" "$target_abs/.pi/skills/$skill" 0
+  done
   print_install_plan_tree "$src/.codex/skills/zcrew" "$target_abs/.codex/skills/zcrew" 0
+
+  if [[ "$keep_compat" == "true" ]]; then
+    local k_rel k_dst k_expected
+    while IFS= read -r k_rel; do
+      k_dst="$target_abs/bin/$k_rel"
+      k_expected="$(keep_symlink_target_for "bin/$k_rel")"
+      if [[ -e "$k_dst" && ! -L "$k_dst" ]]; then
+        PLAN_KEEP+=("bin/$k_rel (non-symlink exists; will warn and skip)")
+      elif [[ -L "$k_dst" && "$(readlink "$k_dst")" == "$k_expected" ]]; then
+        PLAN_KEEP+=("bin/$k_rel (symlink already correct)")
+      else
+        PLAN_REPLACE+=("bin/$k_rel (create symlink -> $k_expected)")
+      fi
+    done < <(zcrew_owned_bin_files)
+    while IFS= read -r k_rel; do
+      k_dst="$target_abs/lib/zcrew/$k_rel"
+      k_expected="$(keep_symlink_target_for "lib/zcrew/$k_rel")"
+      if [[ -e "$k_dst" && ! -L "$k_dst" ]]; then
+        PLAN_KEEP+=("lib/zcrew/$k_rel (non-symlink exists; will warn and skip)")
+      elif [[ -L "$k_dst" && "$(readlink "$k_dst")" == "$k_expected" ]]; then
+        PLAN_KEEP+=("lib/zcrew/$k_rel (symlink already correct)")
+      else
+        PLAN_REPLACE+=("lib/zcrew/$k_rel (create symlink -> $k_expected)")
+      fi
+    done < <(zcrew_owned_lib_files)
+  fi
 
   PLAN_KEEP+=(".bx/config (bx init idempotent)")
   PLAN_KEEP+=(".bx/mounts (will merge/rewrite zcrew-managed block)")
   PLAN_KEEP+=(".bx/.gitignore (will ensure managed entries)")
   PLAN_KEEP+=(".bx/home/ (preserve sandbox home and runtime state)")
   PLAN_KEEP+=(".bx/home/.config/git/ignore (will ensure managed entries)")
+  PLAN_KEEP+=(".bx/home/.pi/agent/mcp.json (strip zcrew MCP entry if present)")
+  PLAN_KEEP+=(".bx/home/.codex/config.toml (strip [mcp_servers.zcrew] block if present)")
+  PLAN_KEEP+=(".bx/home/.gitconfig (create if absent; overwrite if zcrew-managed)")
   PLAN_KEEP+=(".config/mise.toml (will rewrite zcrew managed floor)")
   PLAN_KEEP+=(".mcp.json (will merge/rewrite zcrew MCP entry)")
   PLAN_KEEP+=(".codex/config.toml (will merge/rewrite zcrew block)")
@@ -1565,7 +1609,7 @@ cmd_install() {
   local src_abs migrated stale
   src_abs=$(realpath "$src")
   if [[ "$dry_run" == "true" ]]; then
-    print_install_plan "$src" "$target" "$target_abs"
+    print_install_plan "$src" "$target" "$target_abs" "$keep_compat"
     print_stale_paths "$target_abs"
     return
   fi
