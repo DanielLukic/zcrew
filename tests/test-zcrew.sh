@@ -519,7 +519,7 @@ import pathlib
 import sys
 
 payload = b"\n\nReply from claudio:\nline one\nline two"
-expected = b"send-keys -t %5 -l -- \x1b[200~" + payload + b"\x1b[201~\nsend-keys -t %5 C-m\n"
+expected = b"send-keys -t %5 -l -- \x1b[200~" + payload + b"\x1b[201~\nsend-keys -t %5 -l -- \r\n"
 data = pathlib.Path(sys.argv[1]).read_bytes()
 if data != expected:
     raise SystemExit(f"unexpected mock args bytes: {data!r}")
@@ -797,8 +797,8 @@ case "${1:-}" in
     printf '%s\n' "$TMUX_LIST_OUTPUT"
     ;;
   send-keys)
-    if [[ " $* " != *" C-m "* && " $* " != *" -l "* ]]; then
-      echo "mock tmux: send-keys must be either literal paste or C-m submit" >&2
+    if [[ " $* " != *" -l "* ]]; then
+      echo "mock tmux: send-keys must use literal input" >&2
       exit 91
     fi
     ;;
@@ -6101,7 +6101,7 @@ main() {
   run_test "xmx-l) tmux close kills % pane target" test_xmx_l_close_tmux_kill_pane_with_pct_prefix
   run_test "xmx-m) tmux list strips % from live pane ids" test_xmx_m_list_tmux_strips_percent_from_all_ids
   run_test "xmx-n) tmux rename uses select-pane -T" test_xmx_n_rename_tmux_select_pane_T
-  run_test "xmx-nb) tmux send-text uses bracketed paste, settle delay, and C-m" test_xmx_nb_send_tmux_uses_bracketed_paste_and_cr
+  run_test "xmx-nb) tmux send-text uses bracketed paste, settle delay, and literal CR" test_xmx_nb_send_tmux_uses_bracketed_paste_and_cr
   run_test "xmx-o) tmux claim uses stripped TMUX_PANE" test_xmx_o_claim_uses_tmux_pane_stripped
   run_test "xmx-p) tmux stale session check hard-errors" test_xmx_p_session_check_tmux_stale_hard_errors
   run_test "xmx-q) tmux headless transport matrix" test_xmx_q_tmux_transport_text_matrix

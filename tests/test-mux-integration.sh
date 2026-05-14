@@ -195,6 +195,115 @@ test_tmux_int_h_register_unregister_clean() {
   ! printf '%s\n' "$out" | grep -Fq "ephemeral"
 }
 
+wait_for_file_nonempty() {
+  local file="$1"
+  local timeout_sec="${2:-5}"
+  local deadline
+  deadline=$((SECONDS + timeout_sec))
+
+  while (( SECONDS < deadline )); do
+    [[ -s "$file" ]] && return 0
+    sleep 0.05
+  done
+
+  [[ -s "$file" ]]
+}
+
+wait_for_pane_mode() {
+  local pane_id="$1"
+  local expected="$2"
+  local timeout_sec="${3:-5}"
+  local deadline mode
+  deadline=$((SECONDS + timeout_sec))
+
+  while (( SECONDS < deadline )); do
+    mode="$(tmux -S "$TMUX_SOCK" display-message -p -t "%$pane_id" '#{pane_key_mode}' 2>/dev/null || true)"
+    [[ "$mode" == "$expected" ]] && return 0
+    sleep 0.05
+  done
+
+  mode="$(tmux -S "$TMUX_SOCK" display-message -p -t "%$pane_id" '#{pane_key_mode}' 2>/dev/null || true)"
+  [[ "$mode" == "$expected" ]]
+}
+
+tmux_send_text_submits() {
+  local extended_keys="$1"
+  local extended_format="$2"
+  local request_ext2="$3"
+  local tmpdir capture_file pane_id payload status
+  tmpdir="$(mktemp -d)"
+  capture_file="$tmpdir/submitted.txt"
+  payload="zcrew-submit-${extended_keys}-${extended_format}-$$"
+  status=0
+
+  tmux -S "$TMUX_SOCK" set-option -g extended-keys "$extended_keys" >/dev/null 2>&1 || status=1
+  tmux -S "$TMUX_SOCK" set-option -g extended-keys-format "$extended_format" >/dev/null 2>&1 || status=1
+
+  if [[ "$status" -eq 0 ]]; then
+    pane_id="$(
+      tmux -S "$TMUX_SOCK" split-window -d -P -F '#{pane_id}' -t "$TMUX_SESSION" -- \
+        env CAPTURE_FILE="$capture_file" ZCREW_REQUEST_EXT2="$request_ext2" bash -lc '
+          [[ "$ZCREW_REQUEST_EXT2" == "1" ]] && printf "\033[>4;2m"
+          IFS= read -r line
+          printf "%s\n" "$line" > "$CAPTURE_FILE"
+          sleep 5
+        ' 2>/dev/null || true
+    )"
+    pane_id="${pane_id#%}"
+    [[ -n "$pane_id" ]] || status=1
+  fi
+
+  if [[ "$status" -eq 0 && "$request_ext2" == "1" ]]; then
+    wait_for_pane_mode "$pane_id" "Ext 2" 5 || status=1
+  fi
+
+  if [[ "$status" -eq 0 ]]; then
+    (
+      export TMUX="$TMUX_SOCK,0,0"
+      export TMUX_PANE="%$pane_id"
+      unset ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID BASH_ENV ENV REGISTRY_FILE PROJECT_DIR _MX_BACKEND _MX_BACKEND_CHECKED
+      source "$REPO_ROOT/.zcrew/lib/multiplexer.sh"
+      mx_send_text "$pane_id" "$payload"
+    ) >/dev/null 2>&1 || status=1
+  fi
+
+  if [[ "$status" -eq 0 ]]; then
+    wait_for_file_nonempty "$capture_file" 5 || status=1
+  fi
+
+  if [[ "$status" -eq 0 ]]; then
+    python3 - "$capture_file" "$payload" <<'PY' || status=1
+import sys
+
+path, payload = sys.argv[1], sys.argv[2].encode()
+expected = b"\x1b[200~" + payload + b"\x1b[201~\n"
+with open(path, "rb") as fh:
+    data = fh.read()
+if data != expected:
+    raise SystemExit(f"unexpected submitted bytes: {data!r}")
+PY
+  fi
+
+  [[ -z "${pane_id:-}" ]] || tmux -S "$TMUX_SOCK" kill-pane -t "%$pane_id" 2>/dev/null || true
+  rm -rf "$tmpdir"
+  return "$status"
+}
+
+# tmux-int-i: mx_send_text submits with extended keys disabled
+test_tmux_int_i_send_text_submits_extended_keys_off() {
+  tmux_send_text_submits "off" "xterm" "0"
+}
+
+# tmux-int-j: mx_send_text submits with xterm extended keys in Ext 2 mode
+test_tmux_int_j_send_text_submits_extended_keys_xterm() {
+  tmux_send_text_submits "on" "xterm" "1"
+}
+
+# tmux-int-k: mx_send_text submits with csi-u extended keys in Ext 2 mode
+test_tmux_int_k_send_text_submits_extended_keys_csi_u() {
+  tmux_send_text_submits "on" "csi-u" "1"
+}
+
 # ── runner ───────────────────────────────────────────────────────────────────
 run_test() {
   local desc="$1"
@@ -219,8 +328,11 @@ if tmux_probe; then
   run_test "tmux-int-f: list shows pane" test_tmux_int_f_list_shows_pane
   run_test "tmux-int-g: no live audit.log contamination" test_tmux_int_g_no_live_audit_contamination
   run_test "tmux-int-h: register then unregister" test_tmux_int_h_register_unregister_clean
+  run_test "tmux-int-i: send-text submits with extended-keys off" test_tmux_int_i_send_text_submits_extended_keys_off
+  run_test "tmux-int-j: send-text submits with extended-keys xterm Ext 2" test_tmux_int_j_send_text_submits_extended_keys_xterm
+  run_test "tmux-int-k: send-text submits with extended-keys csi-u Ext 2" test_tmux_int_k_send_text_submits_extended_keys_csi_u
 else
-  skip "tmux-int-a through tmux-int-h (tmux unavailable)"
+  skip "tmux-int-a through tmux-int-k (tmux unavailable)"
 fi
 
 echo "==> Probing zellij..."

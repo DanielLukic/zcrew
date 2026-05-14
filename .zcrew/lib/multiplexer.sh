@@ -226,7 +226,7 @@ mx_send_text() {
     tmux)
       tmux send-keys -t "%$1" -l -- "$(printf '\033[200~%s\033[201~' "$2")"
       sleep 0.15
-      tmux send-keys -t "%$1" C-m
+      tmux send-keys -t "%$1" -l -- $'\r'
       ;;
   esac
 }
