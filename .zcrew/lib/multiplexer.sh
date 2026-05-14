@@ -111,11 +111,21 @@ mx_new_pane() {
   local cwd="$1"
   local name="$2"
   local cmd="$3"
+  local placement="${4:-}"
   local out=""
   local pane_id=""
   case "$_MX_BACKEND" in
     zellij)
-      out="$(zellij action new-pane --cwd "$cwd" --name "$name" -- bash -c "$cmd")" || return 1
+      case "$placement" in
+        pane)
+          out="$(zellij action new-pane --cwd "$cwd" --name "$name" -- bash -c "$cmd")" || return 1
+          ;;
+        *)
+          # Default for zellij: float. Explicit "float" or unrecognised value
+          # also lands here (invalid values fall back to backend default).
+          out="$(zellij action new-pane --floating --cwd "$cwd" --name "$name" -- bash -c "$cmd")" || return 1
+          ;;
+      esac
       pane_id="$(printf '%s\n' "$out" | grep -m1 '^terminal_' | sed 's/^terminal_//')"
       if [[ -z "$pane_id" ]]; then
         # Some tests source this library standalone, outside the main binary.
@@ -128,26 +138,39 @@ mx_new_pane() {
       fi
       ;;
     tmux)
-      out="$(tmux split-window -d -P -F '#{pane_id}' -c "$cwd" -t "$TMUX_PANE" -- bash -c "$cmd")" || return 1
+      case "$placement" in
+        pane)
+          out="$(tmux split-window -d -P -F '#{pane_id}' -c "$cwd" -t "$TMUX_PANE" -- bash -c "$cmd")" || return 1
+          ;;
+        *)
+          # Default for tmux: tab. Explicit "tab" or unrecognised value
+          # also lands here (invalid values fall back to backend default).
+          out="$(tmux new-window -d -P -F '#{pane_id}' -n "$name" -c "$cwd" -- bash -c "$cmd")" || return 1
+          ;;
+      esac
       pane_id="${out#%}"
       if [[ ! "$pane_id" =~ ^[0-9]+$ ]]; then
         # Some tests source this library standalone, outside the main binary.
         if declare -F logger >/dev/null 2>&1; then
-          logger "spawn" "warn" "could not parse pane id from split-window output: $out"
+          logger "spawn" "warn" "could not parse pane id from tmux output: $out"
         fi
         printf '?\n'
       else
-        if [[ -z "${_MX_TMUX_BORDER_WARNED:-}" ]]; then
-          local border_status=""
-          border_status="$(tmux show-options -gv pane-border-status 2>/dev/null || true)"
-          if [[ -z "$border_status" || "$border_status" == "off" ]]; then
-            echo "zcrew: tmux pane titles are hidden; set 'set -g pane-border-status top' in .tmux.conf to see worker names." >&2
+        if [[ "$placement" == "pane" ]]; then
+          # Only tile and warn about borders for in-session pane splits.
+          # new-window (tab) opens its own window — no layout to tile.
+          if [[ -z "${_MX_TMUX_BORDER_WARNED:-}" ]]; then
+            local border_status=""
+            border_status="$(tmux show-options -gv pane-border-status 2>/dev/null || true)"
+            if [[ -z "$border_status" || "$border_status" == "off" ]]; then
+              echo "zcrew: tmux pane titles are hidden; set 'set -g pane-border-status top' in .tmux.conf to see worker names." >&2
+            fi
+            _MX_TMUX_BORDER_WARNED=1
           fi
-          _MX_TMUX_BORDER_WARNED=1
+          tmux select-layout tiled 2>/dev/null || true
         fi
         tmux select-pane -t "%$pane_id" -T "$name" 2>/dev/null || true
         tmux set-option -p -t "%$pane_id" @zcrew-name "$name" 2>/dev/null || true
-        tmux select-layout tiled 2>/dev/null || true
         printf '%s\n' "$pane_id"
       fi
       ;;

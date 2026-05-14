@@ -486,6 +486,9 @@ ensure_team_conf_template() {
   cat > "$team_file" <<'EOF'
 # Team composition — read by the orchestrator at session start.
 # name  agent  model  role
+#@placement float
+#  zellij: float (default) | pane
+#  tmux:   tab   (default) | pane
 claudio  claude  sonnet         assistant / researcher
 sam      codex   -              reviewer
 sparky   codex   gpt-5.3-codex  implementer
@@ -833,6 +836,13 @@ cmd_spawn() {
     fi
   fi
 
+  # Placement: resolved from #@placement directive in team.conf.
+  # Defaults are backend-dependent: zellij→float, tmux→tab.
+  local placement=""
+  if [[ -f "${PROJECT_DIR}/.zcrew/team.conf" ]]; then
+    placement="$(awk '/^[[:space:]]*#@placement[[:space:]]/ { print $2; exit }' "${PROJECT_DIR}/.zcrew/team.conf" 2>/dev/null || true)"
+  fi
+
   # STEP 1: Minimal spawn — just open a new pane. No bx, no wrapper, no
   # sentinel, no registry. Baby steps. Layers added back in subsequent steps.
   logger "spawn" "info" "entry agent=$agent name=$name model=${model:-} cwd=$PWD ZELLIJ_SESSION_NAME=${ZELLIJ_SESSION_NAME:-} ZELLIJ_PANE_ID=${ZELLIJ_PANE_ID:-} MUX_PANE_ID=$( (_MX_BACKEND_CHECKED=1 mx_pane_id) 2>/dev/null || echo)"
@@ -897,7 +907,7 @@ cmd_spawn() {
   local pane_id
   local _stderr_file
   _stderr_file=$(mktemp)
-  pane_id=$(mx_new_pane "$PROJECT_DIR" "$name" "$trap_cmd; ${model_prefix}$launch_cmd" 2>"$_stderr_file")
+  pane_id=$(mx_new_pane "$PROJECT_DIR" "$name" "$trap_cmd; ${model_prefix}$launch_cmd" "$placement" 2>"$_stderr_file")
   local rc=$?
   logger "spawn" "info" "new-pane returned rc=$rc pane_id='$pane_id'"
 

@@ -369,7 +369,7 @@ test_xmx_k_spawn_tmux_split_window_parses_pct_pane_id() {
       set -euo pipefail
       unset _MX_BACKEND _MX_BACKEND_CHECKED
       source "$1"
-      mx_new_pane "/tmp/project" "worker" "echo hi"
+      mx_new_pane "/tmp/project" "worker" "echo hi" pane
       unset _MX_BACKEND _MX_BACKEND_CHECKED
     ' bash "$REPO_ROOT/.zcrew/lib/multiplexer.sh"
   )" || { clear_mx_backend_state; return 1; }
@@ -392,7 +392,7 @@ test_xmx_kb_spawn_tmux_sets_pane_title_after_spawn() {
       set -euo pipefail
       unset _MX_BACKEND _MX_BACKEND_CHECKED
       source "$1"
-      mx_new_pane "/tmp/project" "worker" "echo hi"
+      mx_new_pane "/tmp/project" "worker" "echo hi" pane
       unset _MX_BACKEND _MX_BACKEND_CHECKED
     ' bash "$REPO_ROOT/.zcrew/lib/multiplexer.sh"
   )" || { clear_mx_backend_state; return 1; }
@@ -415,7 +415,7 @@ test_xmx_kc_spawn_tmux_tiles_layout_after_spawn() {
       set -euo pipefail
       unset _MX_BACKEND _MX_BACKEND_CHECKED
       source "$1"
-      mx_new_pane "/tmp/project" "worker" "echo hi"
+      mx_new_pane "/tmp/project" "worker" "echo hi" pane
       unset _MX_BACKEND _MX_BACKEND_CHECKED
     ' bash "$REPO_ROOT/.zcrew/lib/multiplexer.sh"
   )" || { clear_mx_backend_state; return 1; }
@@ -522,7 +522,7 @@ test_xmx_kd_spawn_tmux_sets_zcrew_name() {
       set -euo pipefail
       unset _MX_BACKEND _MX_BACKEND_CHECKED
       source "$1"
-      mx_new_pane "/tmp/project" "worker" "echo hi"
+      mx_new_pane "/tmp/project" "worker" "echo hi" pane
       unset _MX_BACKEND _MX_BACKEND_CHECKED
     ' bash "$REPO_ROOT/.zcrew/lib/multiplexer.sh"
   )" || { clear_mx_backend_state; return 1; }
@@ -879,6 +879,9 @@ fi
 
 case "${1:-}" in
   split-window)
+    printf '%%5\n'
+    ;;
+  new-window)
     printf '%%5\n'
     ;;
   kill-pane)
@@ -2062,6 +2065,193 @@ test_11q_spawn_trap_canonicalizes_symlinked_zcrew_path() {
   printf '%s\n' "$out" | grep -Fq 'spawned: symlinktrap (claude) pane=562' || return 1
   grep -Fq "trap '\"$real_zcrew\" unregister \"symlinktrap\"' EXIT" "$args_file" || return 1
   ! grep -Fq "trap '\"$link_zcrew\" unregister \"symlinktrap\"' EXIT" "$args_file" || return 1
+}
+
+# ── TFD-704 placement ──────────────────────────────────────────────────
+
+_run_spawn_with_team_conf_tmux() {
+  # args: <test_dir> <team_conf_content> <name> [--model X]
+  local d="$1" team_content="$2" worker_name="$3"
+  shift 3
+  local mockbin="$d/mock-bin" args_file="$d/tmux-args.txt"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  mkdir -p "$d/.bx" "$d/.zcrew/lib/launchers"
+  seed_local_tell_sentinel "$d"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$d/.zcrew/lib/launchers/codex.sh"
+  chmod +x "$d/.zcrew/lib/launchers/codex.sh"
+  printf '%s' "$team_content" > "$d/.zcrew/team.conf"
+  make_mock_multiplexer tmux "$mockbin"
+
+  (
+    cd "$d" || exit 1
+    env -u BX_INSIDE -u ZELLIJ_SESSION_NAME -u ZELLIJ_PANE_ID \
+      PATH="$mockbin:$PATH" MOCK_TMUX_ARGS_FILE="$args_file" \
+      MOCK_TMUX_LIST_OUTPUT='' MOCK_TMUX_SESSION_NAME='test-session' \
+      TMUX=/tmp/tmux.sock,123,0 TMUX_PANE=%42 "$ZCREW_BIN" spawn "$@" codex "$worker_name" >/dev/null 2>&1
+  )
+}
+
+test_tfd704_a_zellij_default_float_spawns_floating() {
+  local d args_file
+  d="$(new_test_dir tfd704-a)"
+  args_file="$d/zellij-args.txt"
+
+  _run_spawn_with_team_conf "$d" "sparky codex gpt-5.3-codex implementer
+" "sparky" || return 1
+  grep -Fq 'new-pane --floating' "$args_file" || return 1
+}
+
+test_tfd704_b_zellij_explicit_pane_spawns_tiled() {
+  local d args_file
+  d="$(new_test_dir tfd704-b)"
+  args_file="$d/zellij-args.txt"
+
+  _run_spawn_with_team_conf "$d" "#@placement pane
+sparky codex gpt-5.3-codex implementer
+" "sparky" || return 1
+  grep -Fq 'new-pane --cwd' "$args_file" || return 1
+  ! grep -Fq 'new-pane --floating' "$args_file" || return 1
+}
+
+test_tfd704_c_tmux_default_tab_spawns_new_window() {
+  local d args_file
+  d="$(new_test_dir tfd704-c)"
+  args_file="$d/tmux-args.txt"
+
+  _run_spawn_with_team_conf_tmux "$d" "sparky codex gpt-5.3-codex implementer
+" "sparky" || return 1
+  grep -Fq 'new-window -d -P -F' "$args_file" || return 1
+  ! grep -Fq 'split-window' "$args_file" || return 1
+}
+
+test_tfd704_d_tmux_explicit_pane_spawns_split() {
+  local d args_file
+  d="$(new_test_dir tfd704-d)"
+  args_file="$d/tmux-args.txt"
+
+  _run_spawn_with_team_conf_tmux "$d" "#@placement pane
+sparky codex gpt-5.3-codex implementer
+" "sparky" || return 1
+  grep -Fq 'split-window -d -P -F' "$args_file" || return 1
+  ! grep -Fq 'new-window' "$args_file" || return 1
+}
+
+test_tfd704_e_team_conf_placement_present_parsed() {
+  local d args_file
+  d="$(new_test_dir tfd704-e)"
+  args_file="$d/zellij-args.txt"
+
+  _run_spawn_with_team_conf "$d" "#@placement pane
+sparky codex gpt-5.3-codex implementer
+" "sparky" || return 1
+  grep -Fq 'new-pane --cwd' "$args_file" || return 1
+  ! grep -Fq 'new-pane --floating' "$args_file" || return 1
+}
+
+test_tfd704_f_team_conf_placement_absent_uses_backend_default() {
+  local d args_file
+  d="$(new_test_dir tfd704-f)"
+  args_file="$d/tmux-args.txt"
+
+  _run_spawn_with_team_conf_tmux "$d" "sparky codex gpt-5.3-codex implementer
+" "sparky" || return 1
+  grep -Fq 'new-window -d -P -F' "$args_file" || return 1
+}
+
+test_tfd704_g_team_conf_placement_invalid_falls_back_default() {
+  local d args_file
+  d="$(new_test_dir tfd704-g)"
+  args_file="$d/zellij-args.txt"
+
+  _run_spawn_with_team_conf "$d" "#@placement bogus
+sparky codex gpt-5.3-codex implementer
+" "sparky" || return 1
+  grep -Fq 'new-pane --floating' "$args_file" || return 1
+}
+
+test_tfd704_h_tmux_tab_sets_zcrew_name() {
+  local d args_file
+  d="$(new_test_dir tfd704-h)"
+  args_file="$d/tmux-args.txt"
+
+  _run_spawn_with_team_conf_tmux "$d" "sparky codex gpt-5.3-codex implementer
+" "sparky" || return 1
+  grep -Fq 'new-window' "$args_file" || return 1
+  grep -Fq 'select-pane -t %5 -T sparky' "$args_file" || return 1
+  grep -Fq 'set-option -p -t %5 @zcrew-name sparky' "$args_file" || return 1
+}
+
+# tmux pane placement still sets @zcrew-name (regression check).
+test_tfd704_i_tmux_pane_sets_zcrew_name() {
+  local d args_file
+  d="$(new_test_dir tfd704-i)"
+  args_file="$d/tmux-args.txt"
+
+  _run_spawn_with_team_conf_tmux "$d" "#@placement pane
+sparky codex gpt-5.3-codex implementer
+" "sparky" || return 1
+  grep -Fq 'split-window' "$args_file" || return 1
+  grep -Fq 'set-option -p -t %5 @zcrew-name sparky' "$args_file" || return 1
+}
+
+# tmux tab (new-window) must NOT tile (tiling is pane-split only).
+test_tfd704_j_tmux_tab_no_tile() {
+  local d args_file
+  d="$(new_test_dir tfd704-j)"
+  args_file="$d/tmux-args.txt"
+
+  _run_spawn_with_team_conf_tmux "$d" "sparky codex gpt-5.3-codex implementer
+" "sparky" || return 1
+  grep -Fq 'new-window' "$args_file" || return 1
+  ! grep -Fq 'select-layout tiled' "$args_file" || return 1
+}
+
+# Placement comment lines must start at column 0 or with whitespace.
+test_tfd704_k_placement_indented_with_spaces() {
+  local d args_file
+  d="$(new_test_dir tfd704-k)"
+  args_file="$d/zellij-args.txt"
+
+  _run_spawn_with_team_conf "$d" "  #@placement pane
+sparky codex gpt-5.3-codex implementer
+" "sparky" || return 1
+  grep -Fq 'new-pane --cwd' "$args_file" || return 1
+  ! grep -Fq 'new-pane --floating' "$args_file" || return 1
+}
+
+test_tfd704_l_zellij_float_spawn_registers_pane_id() {
+  local d mockbin args_file out
+  d="$(new_test_dir tfd704-l)"
+  args_file="$d/zellij-args.txt"
+  mockbin="$d/mock-bin"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  mkdir -p "$d/.bx" "$d/.zcrew/lib/launchers"
+  seed_local_tell_sentinel "$d"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$d/.zcrew/lib/launchers/codex.sh"
+  chmod +x "$d/.zcrew/lib/launchers/codex.sh"
+  make_mock_zellij_spawn "$mockbin" "$args_file"
+
+  (
+    cd "$d" || exit 1
+    env -u BX_INSIDE -u ZELLIJ_PANE_ID \
+      PATH="$mockbin:$PATH" MOCK_ZELLIJ_ARGS_FILE="$args_file" \
+      MOCK_ZELLIJ_LIST_OUTPUT='' MOCK_ZELLIJ_NEW_PANE_OUTPUT='terminal_561' \
+      ZELLIJ_SESSION_NAME='test-session' "$ZCREW_BIN" spawn codex sparky >/dev/null 2>&1
+  ) || return 1
+
+  jq -e '.panes.sparky.paneId == "561"' "$d/.zcrew/registry.json" >/dev/null || return 1
+}
+
+test_tfd704_m_tmux_tab_spawn_registers_pane_id() {
+  local d args_file
+  d="$(new_test_dir tfd704-m)"
+  args_file="$d/tmux-args.txt"
+
+  _run_spawn_with_team_conf_tmux "$d" "sparky codex gpt-5.3-codex implementer
+" "sparky" || return 1
+  jq -e '.panes.sparky.paneId == "5"' "$d/.zcrew/registry.json" >/dev/null || return 1
 }
 
 test_12_send_outside_project_fails_hard() {
@@ -3649,6 +3839,9 @@ test_34h_install_seeds_team_conf_template() {
   [[ -f "$d/.zcrew/team.conf" ]] || return 1
   grep -Fxq '# Team composition — read by the orchestrator at session start.' "$d/.zcrew/team.conf" || return 1
   grep -Fxq '# name  agent  model  role' "$d/.zcrew/team.conf" || return 1
+  grep -Fxq '#@placement float' "$d/.zcrew/team.conf" || return 1
+  grep -Fxq '#  zellij: float (default) | pane' "$d/.zcrew/team.conf" || return 1
+  grep -Fxq '#  tmux:   tab   (default) | pane' "$d/.zcrew/team.conf" || return 1
   grep -Fxq 'claudio  claude  sonnet         assistant / researcher' "$d/.zcrew/team.conf" || return 1
   grep -Fxq 'sam      codex   -              reviewer' "$d/.zcrew/team.conf" || return 1
   grep -Fxq 'sparky   codex   gpt-5.3-codex  implementer' "$d/.zcrew/team.conf" || return 1
@@ -6251,6 +6444,19 @@ main() {
   run_test "11o) spawn fails cleanly when zcrew is not on PATH for EXIT trap" test_11o_spawn_fails_when_zcrew_missing_on_path
   run_test "11p) spawn EXIT trap uses resolved zcrew binary path" test_11p_spawn_trap_uses_resolved_binary_not_project_literal
   run_test "11q) spawn EXIT trap canonicalizes symlinked zcrew path" test_11q_spawn_trap_canonicalizes_symlinked_zcrew_path
+  run_test "tfd704-a) zellij default float spawns floating pane" test_tfd704_a_zellij_default_float_spawns_floating
+  run_test "tfd704-b) zellij explicit pane spawns tiled (no --floating)" test_tfd704_b_zellij_explicit_pane_spawns_tiled
+  run_test "tfd704-c) tmux default tab spawns via new-window" test_tfd704_c_tmux_default_tab_spawns_new_window
+  run_test "tfd704-d) tmux explicit pane spawns via split-window" test_tfd704_d_tmux_explicit_pane_spawns_split
+  run_test "tfd704-e) #@placement directive present and parsed" test_tfd704_e_team_conf_placement_present_parsed
+  run_test "tfd704-f) #@placement absent uses backend default (tmux tab)" test_tfd704_f_team_conf_placement_absent_uses_backend_default
+  run_test "tfd704-g) #@placement invalid falls back to backend default" test_tfd704_g_team_conf_placement_invalid_falls_back_default
+  run_test "tfd704-h) tmux tab sets @zcrew-name on new pane" test_tfd704_h_tmux_tab_sets_zcrew_name
+  run_test "tfd704-i) tmux pane still sets @zcrew-name" test_tfd704_i_tmux_pane_sets_zcrew_name
+  run_test "tfd704-j) tmux tab does not tile (no select-layout)" test_tfd704_j_tmux_tab_no_tile
+  run_test "tfd704-k) whitespace-indented #@placement still parsed" test_tfd704_k_placement_indented_with_spaces
+  run_test "tfd704-l) zellij float spawn registers pane id" test_tfd704_l_zellij_float_spawn_registers_pane_id
+  run_test "tfd704-m) tmux tab spawn registers pane id" test_tfd704_m_tmux_tab_spawn_registers_pane_id
   run_test "12) send outside project fails hard" test_12_send_outside_project_fails_hard
   run_test "12b) stale send suggestion preserves unknown agent name" test_12b_send_stale_unknown_agent_preserves_agent_name_in_suggestion
   run_test "13) rename foo->bar preserves fields and removes old key" test_13_rename_happy_path_preserves_fields
