@@ -486,12 +486,13 @@ test_xmx_n_rename_tmux_select_pane_T() {
   clear_mx_backend_state
 }
 
-test_xmx_nb_send_tmux_uses_bracketed_paste_and_cr() {
-  local d mockbin args_file out start_ns end_ns elapsed_ms
+test_xmx_nb_send_tmux_uses_paste_buffer_and_cr() {
+  local d mockbin args_file buffer_file out start_ns end_ns elapsed_ms
   local payload
   d="$(new_test_dir xmx-nb)"
   mockbin="$d/mock-bin"
   args_file="$d/tmux-args.txt"
+  buffer_file="$d/tmux-buffer.txt"
   payload=$'\n\nReply from claudio:\nline one\nline two'
   clear_mx_backend_state
   make_mock_multiplexer tmux "$mockbin"
@@ -503,6 +504,7 @@ test_xmx_nb_send_tmux_uses_bracketed_paste_and_cr() {
       export PATH="$mockbin:$PATH"
       export TMUX=/tmp/tmux.sock,123,0
       export MOCK_TMUX_ARGS_FILE="$args_file"
+      export MOCK_TMUX_BUFFER_FILE="$buffer_file"
       export MOCK_TMUX_SESSION_NAME=sess
       unset ZELLIJ_SESSION_NAME BASH_ENV ENV REGISTRY_FILE PROJECT_DIR _MX_BACKEND _MX_BACKEND_CHECKED
       source "$REPO_ROOT/.zcrew/lib/multiplexer.sh"
@@ -514,15 +516,28 @@ test_xmx_nb_send_tmux_uses_bracketed_paste_and_cr() {
   elapsed_ms="$(( (end_ns - start_ns) / 1000000 ))"
 
   [[ -z "$out" ]] || { clear_mx_backend_state; return 1; }
-  python3 - "$args_file" <<'PY' || { clear_mx_backend_state; return 1; }
+  python3 - "$args_file" "$buffer_file" <<'PY' || { clear_mx_backend_state; return 1; }
 import pathlib
+import re
 import sys
 
+args_path, buffer_path = sys.argv[1], sys.argv[2]
 payload = b"\n\nReply from claudio:\nline one\nline two"
-expected = b"send-keys -t %5 -l -- \x1b[200~" + payload + b"\x1b[201~\nsend-keys -t %5 -l -- \r\n"
-data = pathlib.Path(sys.argv[1]).read_bytes()
-if data != expected:
+data = pathlib.Path(args_path).read_bytes()
+lines = data.splitlines(keepends=True)
+if len(lines) != 3:
     raise SystemExit(f"unexpected mock args bytes: {data!r}")
+match = re.fullmatch(br"load-buffer -b (zcrew-send-5-[0-9]+-[0-9]+) -\n", lines[0])
+if not match:
+    raise SystemExit(f"unexpected load-buffer args: {lines[0]!r}")
+buffer_name = match.group(1)
+expected_paste = b"paste-buffer -p -r -d -b " + buffer_name + b" -t %5\n"
+expected_enter = b"send-keys -t %5 -l -- \r\n"
+if lines[1] != expected_paste or lines[2] != expected_enter:
+    raise SystemExit(f"unexpected mock args bytes: {data!r}")
+buffer_data = pathlib.Path(buffer_path).read_bytes()
+if buffer_data != payload:
+    raise SystemExit(f"unexpected buffer bytes: {buffer_data!r}")
 PY
   [[ "$elapsed_ms" -ge 100 ]] || { clear_mx_backend_state; return 1; }
   clear_mx_backend_state
@@ -623,9 +638,9 @@ test_xmx_q_tmux_transport_text_matrix() {
 import sys
 path = sys.argv[1]
 payload = b"\n\nReply from claudio:\nline one\nline two"
-# tmux delivers C-m to the pane, but the tty running `cat` canonicalizes it to a
-# trailing newline in the captured file.
-expected = b"\x1b[200~" + payload + b"\x1b[201~\n"
+# The pane is a plain cat process that has not enabled bracketed paste, so tmux
+# paste-buffer -p delivers the body bytes and the final CR is canonicalized.
+expected = payload + b"\n"
 data = open(path, "rb").read()
 if data != expected:
     raise SystemExit(f"unexpected bytes: {data!r}")
@@ -775,6 +790,7 @@ MOCK
 set -euo pipefail
 
 TMUX_ARGS_FILE="${MOCK_TMUX_ARGS_FILE:-}"
+TMUX_BUFFER_FILE="${MOCK_TMUX_BUFFER_FILE:-}"
 TMUX_LIST_OUTPUT="${MOCK_TMUX_LIST_OUTPUT:-}"
 TMUX_SESSION_NAME="${MOCK_TMUX_SESSION_NAME:-sess}"
 TMUX_LIST_SESSIONS_OUTPUT="${MOCK_TMUX_LIST_SESSIONS_OUTPUT:-$TMUX_SESSION_NAME}"
@@ -801,6 +817,15 @@ case "${1:-}" in
       echo "mock tmux: send-keys must use literal input" >&2
       exit 91
     fi
+    ;;
+  load-buffer)
+    if [[ -n "$TMUX_BUFFER_FILE" ]]; then
+      cat > "$TMUX_BUFFER_FILE"
+    else
+      cat >/dev/null
+    fi
+    ;;
+  paste-buffer)
     ;;
   display-message)
     if [[ "${2:-}" == "-p" && "${3:-}" == "#S" ]]; then
@@ -6101,7 +6126,7 @@ main() {
   run_test "xmx-l) tmux close kills % pane target" test_xmx_l_close_tmux_kill_pane_with_pct_prefix
   run_test "xmx-m) tmux list strips % from live pane ids" test_xmx_m_list_tmux_strips_percent_from_all_ids
   run_test "xmx-n) tmux rename uses select-pane -T" test_xmx_n_rename_tmux_select_pane_T
-  run_test "xmx-nb) tmux send-text uses bracketed paste, settle delay, and literal CR" test_xmx_nb_send_tmux_uses_bracketed_paste_and_cr
+  run_test "xmx-nb) tmux send-text uses paste-buffer, settle delay, and literal CR" test_xmx_nb_send_tmux_uses_paste_buffer_and_cr
   run_test "xmx-o) tmux claim uses stripped TMUX_PANE" test_xmx_o_claim_uses_tmux_pane_stripped
   run_test "xmx-p) tmux stale session check hard-errors" test_xmx_p_session_check_tmux_stale_hard_errors
   run_test "xmx-q) tmux headless transport matrix" test_xmx_q_tmux_transport_text_matrix
