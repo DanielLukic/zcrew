@@ -2286,8 +2286,8 @@ cmd_claim() {
           lastSeen: ($now | tonumber),
           status: "alive"
         }) as $entry
-    # Delete any old placeholder for this paneId.
-    | .panes |= del(.["pane-" + $paneId])
+    # Delete ALL old entries for this paneId (any key except main).
+    | .panes |= with_entries(select(.key == "main" or (.value.paneId // "") != $paneId))
     # Promote/upsert main with the merged entry.
     | .panes.main = ($entry
         | .paneId = $paneId
