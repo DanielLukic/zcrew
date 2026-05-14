@@ -2231,10 +2231,13 @@ cmd_log_error() {
 cmd_claim() {
   CURRENT_SUBCMD="claim"
 
+  # 1. Host-only guard: fail hard before any writes.
   if [[ -n "${BX_INSIDE:-}" ]]; then
     echo "zcrew claim is host-only; run it in the orchestrator pane." >&2
     exit 1
   fi
+
+  # 2. Resolve caller identity.
   local pane_id=""
   if ! pane_id="$(mx_pane_id 2>/dev/null)"; then
     echo "zcrew: claim must be run inside a multiplexer pane" >&2
@@ -2246,10 +2249,7 @@ cmd_claim() {
     exit 1
   fi
 
-  require_project
-  ensure_registry_files
-  mx_require_session
-
+  # 3. Parse --replace (accepted silently for back-compat, no-op).
   local replace=false
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -2259,23 +2259,63 @@ cmd_claim() {
     shift
   done
 
-  local live_main_info live_main_name live_main_pane
-  live_main_info="$(lookup_live_main_info)"
-  if [[ -n "$live_main_info" ]]; then
-    IFS=$'\t' read -r live_main_name live_main_pane <<< "$live_main_info"
-    if [[ "$live_main_pane" == "$pane_id" ]]; then
-      return 0
-    fi
-    if [[ "$replace" != "true" ]]; then
-      echo "zcrew: main is already $live_main_name (paneId $live_main_pane). Use --replace to swap." >&2
-      exit 1
-    fi
-    echo "replacing main: $live_main_name (paneId $live_main_pane)"
-    claim_main_alias true
-    return 0
-  fi
+  # 4. Unconditional registry write: claim main.paneId = caller BEFORE any sync.
+  _resolve_and_set_project_dir "stateful"
+  [[ -d "$STATE_DIR" ]] || fail_not_initialized
+  ensure_registry_files
+  local now=""
+  now=$(date +%s)
+  registry_write_jq '
+    .version = 1
+    | .panes = (.panes // {})
+    | .panes.main = {
+        paneId: $paneId,
+        sessionId: ($sessionId // null),
+        agent: "unknown",
+        projectDir: $projectDir,
+        cwd: $cwd,
+        pid: ($pid | tonumber),
+        lastSeen: ($now | tonumber),
+        status: "alive"
+      }
+  ' \
+    --arg paneId "$pane_id" \
+    --arg sessionId "$session" \
+    --arg projectDir "$PROJECT_DIR" \
+    --arg cwd "$PWD" \
+    --arg pid "$$" \
+    --arg now "$now"
 
-  claim_main_alias false
+  # 5. Strip "main" title from every OTHER live pane.
+  #    Without this, reconcile's first-match-wins liveByTitle could rebind
+  #    main to a stale foreign pane that still carries the title "main".
+  #    Use process substitution so the loop runs in the current shell
+  #    (mx_rename_pane needs _MX_BACKEND which is set above).
+  local live_id live_title reg_name
+  while IFS=$'\t' read -r live_id live_title; do
+    [[ -n "$live_id" ]] || continue
+    [[ "$live_id" == "$pane_id" ]] && continue
+    [[ "$live_title" == "main" ]] || continue
+    # Find this pane's registry name, fall back to "pane-<id>".
+    reg_name="$(jq -r --arg id "$live_id" \
+      '.panes | to_entries[] | select(.value.paneId == $id) | .key' \
+      "$REGISTRY_FILE" 2>/dev/null || true)"
+    [[ -n "$reg_name" ]] || reg_name="pane-$live_id"
+    mx_rename_pane "$live_id" "$reg_name"
+  done < <(mx_list_panes 2>/dev/null || true)
+
+  # 6. Rename caller pane to "main". Now exactly one live pane is titled
+  #    "main" → reconcile's liveByTitle["main"] is deterministic.
+  mx_rename_pane "$pane_id" "main"
+
+  # 7. Now it's safe to sync: require_project → reconcile will find
+  #    liveByTitle["main"] = caller's pane and bind correctly.
+  require_project
+  mx_require_session
+
+  # 8. Fill remaining fields from any existing pane entry (merges old
+  #    metadata like agent, pid, etc.) and clean up stale placeholder.
+  claim_main_alias "$replace"
 }
 
 cmd_list() {

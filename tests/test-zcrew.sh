@@ -673,20 +673,57 @@ case "${1:-}" in
     shift
     case "${1:-}" in
       list-panes)
-        # Backward-compat: auto-convert old-format terminal_NNN lines to full format
+        # Backward-compat: auto-convert old-format terminal_NNN lines to full format.
+        # Apply persisted title overrides from rename-pane (if MOCK_ZELLIJ_TITLE_MAP set).
+        TITLE_MAP="${MOCK_ZELLIJ_TITLE_MAP:-}"
         if [[ "$LIST_OUTPUT" == $'PANE_ID'* ]]; then
-          printf '%s\n' "$LIST_OUTPUT"
+          if [[ -n "$TITLE_MAP" && -f "$TITLE_MAP" ]]; then
+            printf '%s\n' "$LIST_OUTPUT" | awk -v map="$TITLE_MAP" '
+              BEGIN {
+                while ((getline line < map) > 0) {
+                  split(line, kv, "=")
+                  titles[kv[1]] = kv[2]
+                }
+              }
+              NR==1 {print; next}
+              {
+                id = $1; sub(/^terminal_/, "", id)
+                if (titles[id] != "") $3 = titles[id]
+                for (i=4; i<=NF; i++) $i = ""
+                # Reconstruct: PANE_ID  TYPE  TITLE
+                gsub(/  +/, "  ")
+                print
+              }
+            '
+          else
+            printf '%s\n' "$LIST_OUTPUT"
+          fi
         else
           printf 'PANE_ID  TYPE  TITLE\n'
           while IFS= read -r line; do
             [[ -n "$line" ]] || continue
             if [[ "$line" == terminal_* ]]; then
               id="${line#terminal_}"
-              printf '%s  terminal  pane-%s\n' "$line" "$id"
+              TITLE_OVERRIDE=""
+              if [[ -n "$TITLE_MAP" && -f "$TITLE_MAP" ]]; then
+                TITLE_OVERRIDE="$(grep "^${id}=" "$TITLE_MAP" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+              fi
+              if [[ -n "$TITLE_OVERRIDE" ]]; then
+                printf '%s  terminal  %s\n' "$line" "$TITLE_OVERRIDE"
+              else
+                printf '%s  terminal  pane-%s\n' "$line" "$id"
+              fi
             else
               printf '%s\n' "$line"
             fi
           done <<< "$LIST_OUTPUT"
+        fi
+        ;;
+      rename-pane)
+        # Persist title override: rename-pane -p <id> <new_title>
+        # After shift in action handler: $1=rename-pane $2=-p $3=paneId $4=title
+        if [[ -n "${MOCK_ZELLIJ_TITLE_MAP:-}" ]]; then
+          printf '%s=%s\n' "${3:-}" "${4:-}" >> "$MOCK_ZELLIJ_TITLE_MAP"
         fi
         ;;
       close-pane)
@@ -4623,21 +4660,6 @@ test_72b_claim_with_no_main_registers_caller() {
   jq -e '.panes.main.paneId == "42"' "$d/.zcrew/registry.json" >/dev/null
 }
 
-test_72c_claim_errors_when_live_main_owned_by_other_pane() {
-  local d mockbin out
-  d="$(new_test_dir 72c)"
-  mockbin="$d/mock-bin"
-
-  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
-  zcrew_cmd "$d" register main --paneId 50 --sessionId s50 --agent unknown --cwd "$d" --pid 50 --status alive >/dev/null 2>&1 || return 1
-  prepare_send_test_tools "$d" "$mockbin" "$d/tell-args.txt" "50,42"
-
-  if out="$(cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=42 "$ZCREW_BIN" claim 2>&1)"; then
-    return 1
-  fi
-  printf '%s\n' "$out" | grep -Fxq 'zcrew: main is already main (paneId 50). Use --replace to swap.'
-}
-
 test_72d_claim_is_idempotent_when_caller_is_live_main() {
   local d mockbin out
   d="$(new_test_dir 72d)"
@@ -4651,21 +4673,6 @@ test_72d_claim_is_idempotent_when_caller_is_live_main() {
 
   [[ -z "$out" ]] || return 1
   jq -e '.panes.main.paneId == "42"' "$d/.zcrew/registry.json" >/dev/null
-}
-
-test_72e_claim_replace_swaps_live_main_and_prints_old_info() {
-  local d mockbin out
-  d="$(new_test_dir 72e)"
-  mockbin="$d/mock-bin"
-
-  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
-  zcrew_cmd "$d" register main --paneId 50 --sessionId s50 --agent unknown --cwd "$d" --pid 50 --status alive >/dev/null 2>&1 || return 1
-  zcrew_cmd "$d" register pane-42 --paneId 42 --sessionId s42 --agent unknown --cwd "$d" --pid 42 --status alive >/dev/null 2>&1 || return 1
-  prepare_send_test_tools "$d" "$mockbin" "$d/tell-args.txt" "50,42"
-
-  out="$(cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=42 "$ZCREW_BIN" claim --replace 2>&1)" || return 1
-  printf '%s\n' "$out" | grep -Fxq 'replacing main: main (paneId 50)' || return 1
-  jq -e '.panes.main.paneId == "42" and (.panes | has("pane-42") | not)' "$d/.zcrew/registry.json" >/dev/null
 }
 
 test_72f_claim_from_worker_errors() {
@@ -5801,8 +5808,223 @@ test_106_clone_mode_install_materializes_local_layout() {
   [[ -f "$d/.zcrew/registry.json" ]]
 }
 
+# ── claim-identity fix: 9 acceptance tests ─────────────────────────────
 
+test_ci_1_claim_caller_wins_even_when_foreign_pane_titled_main() {
+  local d mockbin args_file title_map out
+  d="$(new_test_dir ci-1)"
+  mockbin="$d/mock-bin"
+  args_file="$d/zellij-args.txt"
+  title_map="$d/title-map.txt"
 
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  seed_local_lib_fixture "$d"
+  make_mock_zellij "$mockbin"
+
+  out="$(cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" \
+    MOCK_ZELLIJ_ARGS_FILE="$args_file" \
+    MOCK_ZELLIJ_TITLE_MAP="$title_map" \
+    MOCK_ZELLIJ_LIST_OUTPUT=$'PANE_ID  TYPE  TITLE\nterminal_1  terminal\nterminal_2  terminal  worker-1\nterminal_3  terminal  main' \
+    ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=1 \
+    "$ZCREW_BIN" claim 2>&1)" || return 1
+
+  # Sync is enabled (default): post-reconcile, main must be bound to caller.
+  jq -e '.panes.main.paneId == "1"' "$d/.zcrew/registry.json" >/dev/null || return 1
+  # Pane 3 (foreign "main") must have been retitled away.
+  grep -Fq 'action rename-pane -p 3 pane-3' "$args_file" || return 1
+  # Caller must have been renamed to "main".
+  grep -Fq 'action rename-pane -p 1 main' "$args_file" || return 1
+}
+
+test_ci_2_claim_sets_caller_pane_title_to_main() {
+  local d mockbin args_file title_map out
+  d="$(new_test_dir ci-2)"
+  mockbin="$d/mock-bin"
+  args_file="$d/zellij-args.txt"
+  title_map="$d/title-map.txt"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  seed_local_lib_fixture "$d"
+  make_mock_zellij "$mockbin"
+
+  out="$(cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" \
+    MOCK_ZELLIJ_ARGS_FILE="$args_file" \
+    MOCK_ZELLIJ_TITLE_MAP="$title_map" \
+    MOCK_ZELLIJ_LIST_OUTPUT=$'PANE_ID  TYPE  TITLE\nterminal_1  terminal' \
+    ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=1 \
+    ZCREW_AUTO_SYNC=0 "$ZCREW_BIN" claim 2>&1)" || return 1
+
+  jq -e '.panes.main.paneId == "1" and .panes.main.status == "alive"' "$d/.zcrew/registry.json" >/dev/null || return 1
+  grep -Fq 'action rename-pane -p 1 main' "$args_file" || return 1
+}
+
+test_ci_3_sync_after_claim_does_not_rebind_main_away() {
+  local d mockbin out
+  d="$(new_test_dir ci-3)"
+  mockbin="$d/mock-bin"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register main --paneId 1 --sessionId s1 --agent unknown --cwd "$d" --pid 1 --status alive >/dev/null 2>&1 || return 1
+  make_mock_zellij "$mockbin"
+
+  out="$(cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" \
+    MOCK_ZELLIJ_LIST_OUTPUT=$'PANE_ID  TYPE  TITLE\nterminal_1  terminal  main' \
+    ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=1 \
+    "$ZCREW_BIN" sync --keep-stale 2>&1)" || return 1
+
+  jq -e '.panes.main.paneId == "1" and .panes.main.status == "alive"' "$d/.zcrew/registry.json" >/dev/null
+}
+
+test_ci_4_claim_takes_over_when_another_pane_registered_main() {
+  local d mockbin args_file title_map out
+  d="$(new_test_dir ci-4)"
+  mockbin="$d/mock-bin"
+  args_file="$d/zellij-args.txt"
+  title_map="$d/title-map.txt"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register main --paneId 5 --sessionId s5 --agent unknown --cwd "$d" --pid 5 --status alive >/dev/null 2>&1 || return 1
+  seed_local_lib_fixture "$d"
+  make_mock_zellij "$mockbin"
+
+  out="$(cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" \
+    MOCK_ZELLIJ_ARGS_FILE="$args_file" \
+    MOCK_ZELLIJ_TITLE_MAP="$title_map" \
+    MOCK_ZELLIJ_LIST_OUTPUT=$'PANE_ID  TYPE  TITLE\nterminal_1  terminal' \
+    ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=1 \
+    ZCREW_AUTO_SYNC=0 "$ZCREW_BIN" claim 2>&1)" || return 1
+
+  # No "already main" error — caller takes over silently.
+  [[ -z "$out" ]] || return 1
+  jq -e '.panes.main.paneId == "1"' "$d/.zcrew/registry.json" >/dev/null || return 1
+  grep -Fq 'action rename-pane -p 1 main' "$args_file" || return 1
+}
+
+test_ci_5_claim_from_worker_pane_replaces_title() {
+  local d mockbin args_file title_map out
+  d="$(new_test_dir ci-5)"
+  mockbin="$d/mock-bin"
+  args_file="$d/zellij-args.txt"
+  title_map="$d/title-map.txt"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  seed_local_lib_fixture "$d"
+  make_mock_zellij "$mockbin"
+
+  out="$(cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" \
+    MOCK_ZELLIJ_ARGS_FILE="$args_file" \
+    MOCK_ZELLIJ_TITLE_MAP="$title_map" \
+    MOCK_ZELLIJ_LIST_OUTPUT=$'PANE_ID  TYPE  TITLE\nterminal_2  terminal  worker-1' \
+    ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=2 \
+    ZCREW_AUTO_SYNC=0 "$ZCREW_BIN" claim 2>&1)" || return 1
+
+  jq -e '.panes.main.paneId == "2"' "$d/.zcrew/registry.json" >/dev/null || return 1
+  grep -Fq 'action rename-pane -p 2 main' "$args_file" || return 1
+}
+
+test_ci_6_claim_with_BX_INSIDE_fails_hard_no_writes() {
+  local d mockbin args_file title_map before out
+  d="$(new_test_dir ci-6)"
+  mockbin="$d/mock-bin"
+  args_file="$d/zellij-args.txt"
+  title_map="$d/title-map.txt"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  seed_local_lib_fixture "$d"
+  make_mock_zellij "$mockbin"
+  before="$(sha256sum "$d/.zcrew/registry.json")" || return 1
+
+  if out="$(cd "$d" && BX_INSIDE=1 PATH="$mockbin:$PATH" \
+    MOCK_ZELLIJ_ARGS_FILE="$args_file" \
+    MOCK_ZELLIJ_TITLE_MAP="$title_map" \
+    ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=42 \
+    "$ZCREW_BIN" claim 2>&1)"; then
+    return 1
+  fi
+
+  printf '%s\n' "$out" | grep -Fxq 'zcrew claim is host-only; run it in the orchestrator pane.' || return 1
+  # No rename-pane calls.
+  [[ ! -f "$args_file" ]] || ! grep -q 'rename-pane' "$args_file" || return 1
+  # Registry unchanged.
+  [[ "$before" == "$(sha256sum "$d/.zcrew/registry.json")" ]] || return 1
+}
+
+test_ci_7_claim_replace_accepted_silently_idempotent() {
+  local d mockbin args_file title_map out
+  d="$(new_test_dir ci-7)"
+  mockbin="$d/mock-bin"
+  args_file="$d/zellij-args.txt"
+  title_map="$d/title-map.txt"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register main --paneId 1 --sessionId s1 --agent unknown --cwd "$d" --pid 1 --status alive >/dev/null 2>&1 || return 1
+  seed_local_lib_fixture "$d"
+  make_mock_zellij "$mockbin"
+
+  out="$(cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" \
+    MOCK_ZELLIJ_ARGS_FILE="$args_file" \
+    MOCK_ZELLIJ_TITLE_MAP="$title_map" \
+    MOCK_ZELLIJ_LIST_OUTPUT=$'PANE_ID  TYPE  TITLE\nterminal_1  terminal  main' \
+    ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=1 \
+    ZCREW_AUTO_SYNC=0 "$ZCREW_BIN" claim --replace 2>&1)" || return 1
+
+  [[ -z "$out" ]] || return 1
+  jq -e '.panes.main.paneId == "1"' "$d/.zcrew/registry.json" >/dev/null || return 1
+}
+
+test_ci_8_claim_retitles_foreign_main_with_registry_name() {
+  local d mockbin args_file title_map out
+  d="$(new_test_dir ci-8)"
+  mockbin="$d/mock-bin"
+  args_file="$d/zellij-args.txt"
+  title_map="$d/title-map.txt"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  zcrew_cmd "$d" register worker-1 --paneId 3 --sessionId s3 --agent unknown --cwd "$d" --pid 3 --status alive >/dev/null 2>&1 || return 1
+  seed_local_lib_fixture "$d"
+  make_mock_zellij "$mockbin"
+
+  # Pane 3 is live and titled "main", with registry entry "worker-1".
+  # Caller is pane 1 with no title.
+  out="$(cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" \
+    MOCK_ZELLIJ_ARGS_FILE="$args_file" \
+    MOCK_ZELLIJ_TITLE_MAP="$title_map" \
+    MOCK_ZELLIJ_LIST_OUTPUT=$'PANE_ID  TYPE  TITLE\nterminal_1  terminal\nterminal_3  terminal  main' \
+    ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=1 \
+    ZCREW_AUTO_SYNC=0 "$ZCREW_BIN" claim 2>&1)" || return 1
+
+  # Pane 3 retitled to its registry name BEFORE caller renamed.
+  grep -Fq 'action rename-pane -p 3 worker-1' "$args_file" || return 1
+  grep -Fq 'action rename-pane -p 1 main' "$args_file" || return 1
+  # Order check: pane 3 rename must appear before pane 1 rename.
+  local line3="$(grep -n 'rename-pane.*-p 3' "$args_file" | head -1 | cut -d: -f1)"
+  local line1="$(grep -n 'rename-pane.*-p 1 main' "$args_file" | head -1 | cut -d: -f1)"
+  [[ "$line3" -lt "$line1" ]] || return 1
+  jq -e '.panes.main.paneId == "1"' "$d/.zcrew/registry.json" >/dev/null || return 1
+}
+
+test_ci_8b_claim_retitles_foreign_main_to_pane_id_fallback() {
+  local d mockbin args_file title_map out
+  d="$(new_test_dir ci-8b)"
+  mockbin="$d/mock-bin"
+  args_file="$d/zellij-args.txt"
+  title_map="$d/title-map.txt"
+
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  seed_local_lib_fixture "$d"
+  make_mock_zellij "$mockbin"
+
+  # Pane 3 is live and titled "main", but has NO registry entry (fallback path).
+  out="$(cd "$d" && env -u BX_INSIDE PATH="$mockbin:$PATH" \
+    MOCK_ZELLIJ_ARGS_FILE="$args_file" \
+    MOCK_ZELLIJ_TITLE_MAP="$title_map" \
+    MOCK_ZELLIJ_LIST_OUTPUT=$'PANE_ID  TYPE  TITLE\nterminal_1  terminal\nterminal_3  terminal  main' \
+    ZELLIJ_SESSION_NAME=test-session ZELLIJ_PANE_ID=1 \
+    ZCREW_AUTO_SYNC=0 "$ZCREW_BIN" claim 2>&1)" || return 1
+
+  grep -Fq 'action rename-pane -p 3 pane-3' "$args_file" || return 1
+  jq -e '.panes.main.paneId == "1"' "$d/.zcrew/registry.json" >/dev/null || return 1
+}
 
 
 main() {
@@ -6016,9 +6238,7 @@ main() {
   run_test "72l) worker reply with empty sender uses unknown" test_72l_reply_from_worker_with_empty_sender_uses_unknown
   run_test "72m) worker slash-command reply bypasses prefix" test_72m_reply_from_worker_with_slash_command_bypasses_prefix
   run_test "72b) claim with no main registers caller" test_72b_claim_with_no_main_registers_caller
-  run_test "72c) claim errors when live main owned by other pane" test_72c_claim_errors_when_live_main_owned_by_other_pane
   run_test "72d) claim is idempotent when caller is live main" test_72d_claim_is_idempotent_when_caller_is_live_main
-  run_test "72e) claim --replace swaps live main and prints old info" test_72e_claim_replace_swaps_live_main_and_prints_old_info
   run_test "72f) claim from worker errors" test_72f_claim_from_worker_errors
   run_test "72g) claim outside multiplexer errors" test_72g_claim_outside_zellij_errors
   run_test "72h) worker reply without main shows claim hint" test_72h_reply_without_main_shows_claim_hint
@@ -6070,6 +6290,15 @@ main() {
   run_test "95) install pi extensions preserves other extensions" test_95_install_pi_extensions_preserves_other_extensions
   run_test "95c) seed_mcp_configs fails loudly when resolved lib server is missing" test_95c_seed_mcp_configs_fails_loud_when_server_missing
   run_test "95d) seed_orchestrator_configs fails loudly when resolved lib server is missing" test_95d_seed_orchestrator_configs_fails_loud_when_server_missing
+  run_test "ci-1) claim caller wins when foreign pane titled main (post-reconcile deterministic)" test_ci_1_claim_caller_wins_even_when_foreign_pane_titled_main
+  run_test "ci-2) claim sets caller pane title to main" test_ci_2_claim_sets_caller_pane_title_to_main
+  run_test "ci-3) sync after claim does not rebind main away" test_ci_3_sync_after_claim_does_not_rebind_main_away
+  run_test "ci-4) claim takes over when another pane is registered main (no error)" test_ci_4_claim_takes_over_when_another_pane_registered_main
+  run_test "ci-5) claim from worker pane replaces its title with main" test_ci_5_claim_from_worker_pane_replaces_title
+  run_test "ci-6) claim with BX_INSIDE=1 fails hard with no writes or pane rename" test_ci_6_claim_with_BX_INSIDE_fails_hard_no_writes
+  run_test "ci-7) claim --replace accepted silently (idempotent)" test_ci_7_claim_replace_accepted_silently_idempotent
+  run_test "ci-8) claim retitles foreign main to registry name before caller wins" test_ci_8_claim_retitles_foreign_main_with_registry_name
+  run_test "ci-8b) claim retitles foreign main to pane-id fallback when no registry entry" test_ci_8b_claim_retitles_foreign_main_to_pane_id_fallback
   run_test "106) clone-mode install still materializes local tooling + skills" test_106_clone_mode_install_materializes_local_layout
 
   echo ""
