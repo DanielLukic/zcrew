@@ -1391,7 +1391,13 @@ print_install_plan() {
     PLAN_REPLACE+=(".claude/hooks/zcrew-register.sh (remove retired hook)")
   fi
   if [[ -f "$target_abs/.claude/settings.json" ]] && \
-     jq -e '(.hooks.SessionStart // []) | length > 0' "$target_abs/.claude/settings.json" >/dev/null 2>&1; then
+     jq -e --arg hook '${CLAUDE_PROJECT_DIR}/.claude/hooks/zcrew-register.sh' '
+       (.hooks.SessionStart // [])
+       | map(.hooks // [])
+       | flatten
+       | map(select(.type == "command" and .command == $hook))
+       | length > 0
+     ' "$target_abs/.claude/settings.json" >/dev/null 2>&1; then
     PLAN_REPLACE+=(".claude/settings.json (remove retired SessionStart hook)")
   fi
 

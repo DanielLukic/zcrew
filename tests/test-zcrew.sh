@@ -2411,6 +2411,19 @@ test_18tc_dryrun_no_claude_cleanup_on_clean_target() {
   ! printf '%s\n' "$replace" | grep -Fq '.claude/hooks/zcrew-register.sh'
 }
 
+test_18td_dryrun_unrelated_sessionstart_not_reported() {
+  local d out replace
+  d="$(new_test_dir 18td)"
+  mkdir -p "$d/.claude"
+  cat > "$d/.claude/settings.json" <<'EOF'
+{"hooks":{"SessionStart":[{"matcher":"*","hooks":[{"type":"command","command":"echo keep-me"}]}]}}
+EOF
+
+  out="$(dryrun_install_cmd "$TEST_ROOT" "$d" --dry-run 2>&1)" || return 1
+  replace="$(printf '%s\n' "$out" | plan_section REPLACE)" || return 1
+  ! printf '%s\n' "$replace" | grep -Fq '.claude/settings.json'
+}
+
 test_18u_dryrun_no_stale_paths_exit_zero() {
   local d out
   d="$(new_test_dir 18u)"
@@ -5888,6 +5901,7 @@ main() {
   run_test "18ta) dry-run --keep reports compat symlinks in plan" test_18ta_dryrun_keep_reports_compat_symlinks
   run_test "18tb) dry-run reports retired .claude/hooks/zcrew-register.sh when present" test_18tb_dryrun_claude_cleanup_reports_retired_hook
   run_test "18tc) dry-run omits .claude cleanup on clean target" test_18tc_dryrun_no_claude_cleanup_on_clean_target
+  run_test "18td) dry-run does not report settings.json for unrelated SessionStart" test_18td_dryrun_unrelated_sessionstart_not_reported
   run_test "18u) dry-run with clean install has no stale paths and exits 0" test_18u_dryrun_no_stale_paths_exit_zero
   run_test "18v) dry-run reports stale .mcp.json and exits 1" test_18v_dryrun_stale_mcp_json_reported_exit_one
   run_test "18w) dry-run reports stale .claude/settings.local.json and exits 1" test_18w_dryrun_stale_claude_settings_reported_exit_one
