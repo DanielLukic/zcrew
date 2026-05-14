@@ -146,6 +146,7 @@ mx_new_pane() {
           _MX_TMUX_BORDER_WARNED=1
         fi
         tmux select-pane -t "%$pane_id" -T "$name" 2>/dev/null || true
+        tmux set-option -p -t "%$pane_id" @zcrew-name "$name" 2>/dev/null || true
         tmux select-layout tiled 2>/dev/null || true
         printf '%s\n' "$pane_id"
       fi
@@ -165,7 +166,10 @@ mx_rename_pane() {
   _mx_require_backend
   case "$_MX_BACKEND" in
     zellij) zellij action rename-pane -p "$1" "$2" 2>/dev/null || true ;;
-    tmux) tmux select-pane -t "%$1" -T "$2" 2>/dev/null || true ;;
+    tmux)
+      tmux select-pane -t "%$1" -T "$2" 2>/dev/null || true
+      tmux set-option -p -t "%$1" @zcrew-name "$2" 2>/dev/null || true
+      ;;
   esac
 }
 
@@ -183,9 +187,11 @@ mx_list_pane_ids() {
 }
 
 # mx_list_panes returns one line per live terminal pane:
-#   pane_id<TAB>title
+#   pane_id<TAB>name
 # Pane IDs have prefixes stripped (no terminal_ / no %).
-# Titles are sanitized: tabs collapsed to single space.
+# For tmux, "name" is the @zcrew-name custom pane option (TUI-proof); panes
+# without @zcrew-name set produce an empty name (treated as unregistered).
+# Names are sanitized: tabs collapsed to single space.
 mx_list_panes() {
   _mx_require_backend
   case "$_MX_BACKEND" in
@@ -203,7 +209,7 @@ mx_list_panes() {
     tmux)
       local session_name=""
       session_name="$(mx_session_name 2>/dev/null)" || return 0
-      tmux list-panes -a -F $'#{pane_id}\x01#{pane_title}\x01#{session_name}' 2>/dev/null |
+      tmux list-panes -a -F $'#{pane_id}\x01#{@zcrew-name}\x01#{session_name}' 2>/dev/null |
         awk -F $'\x01' -v s="$session_name" '$3==s {
           sub(/^%/, "", $1)
           gsub(/\t/, " ", $2)

@@ -486,6 +486,84 @@ test_xmx_n_rename_tmux_select_pane_T() {
   clear_mx_backend_state
 }
 
+# mx_rename_pane must also write @zcrew-name so reconcile can find the pane
+# even after a TUI clobbers the human-visible pane title.
+test_xmx_nc_rename_tmux_sets_zcrew_name() {
+  local d mockbin args_file
+  d="$(new_test_dir xmx-nc)"
+  mockbin="$d/mock-bin"
+  args_file="$d/tmux-args.txt"
+  clear_mx_backend_state
+  make_mock_multiplexer tmux "$mockbin"
+
+  env -u ZELLIJ_SESSION_NAME PATH="$mockbin:$PATH" TMUX=/tmp/tmux.sock,123,0 MOCK_TMUX_ARGS_FILE="$args_file" MOCK_TMUX_SESSION_NAME=sess bash -lc '
+    set -euo pipefail
+    unset _MX_BACKEND _MX_BACKEND_CHECKED
+    source "$1"
+    mx_rename_pane "5" "name"
+    unset _MX_BACKEND _MX_BACKEND_CHECKED
+  ' bash "$REPO_ROOT/.zcrew/lib/multiplexer.sh" >/dev/null 2>&1 || { clear_mx_backend_state; return 1; }
+
+  grep -Fq "set-option -p -t %5 @zcrew-name name" "$args_file" || { clear_mx_backend_state; return 1; }
+  clear_mx_backend_state
+}
+
+# mx_new_pane must set @zcrew-name so spawned panes are identifiable immediately.
+test_xmx_kd_spawn_tmux_sets_zcrew_name() {
+  local d mockbin args_file out
+  d="$(new_test_dir xmx-kd)"
+  mockbin="$d/mock-bin"
+  args_file="$d/tmux-args.txt"
+  clear_mx_backend_state
+  make_mock_multiplexer tmux "$mockbin"
+
+  out="$(
+    env -u ZELLIJ_SESSION_NAME PATH="$mockbin:$PATH" TMUX=/tmp/tmux.sock,123,0 TMUX_PANE=%42 MOCK_TMUX_ARGS_FILE="$args_file" MOCK_TMUX_SESSION_NAME=sess bash -lc '
+      set -euo pipefail
+      unset _MX_BACKEND _MX_BACKEND_CHECKED
+      source "$1"
+      mx_new_pane "/tmp/project" "worker" "echo hi"
+      unset _MX_BACKEND _MX_BACKEND_CHECKED
+    ' bash "$REPO_ROOT/.zcrew/lib/multiplexer.sh"
+  )" || { clear_mx_backend_state; return 1; }
+
+  [[ "$out" == "5" ]] || { clear_mx_backend_state; return 1; }
+  grep -Fq "set-option -p -t %5 @zcrew-name worker" "$args_file" || { clear_mx_backend_state; return 1; }
+  clear_mx_backend_state
+}
+
+# mx_list_panes must read #{@zcrew-name} — the machine-identity field — not
+# #{pane_title} which TUIs can clobber via OSC escape sequences.
+test_xmx_oc_list_tmux_uses_zcrew_name_format() {
+  local d mockbin args_file out
+  d="$(new_test_dir xmx-oc)"
+  mockbin="$d/mock-bin"
+  args_file="$d/tmux-args.txt"
+  clear_mx_backend_state
+  make_mock_multiplexer tmux "$mockbin"
+
+  # Provide @zcrew-name as field 2; pane_title would be "tui-title" (clobbered).
+  out="$(
+    env -u ZELLIJ_SESSION_NAME PATH="$mockbin:$PATH" TMUX=/tmp/tmux.sock,123,0 \
+      MOCK_TMUX_ARGS_FILE="$args_file" MOCK_TMUX_SESSION_NAME=sess \
+      MOCK_TMUX_LIST_OUTPUT=$'%42\x01claudio\x01sess\n%11\x01sam\x01sess' bash -lc '
+        set -euo pipefail
+        unset _MX_BACKEND _MX_BACKEND_CHECKED
+        source "$1"
+        mx_list_panes
+        unset _MX_BACKEND _MX_BACKEND_CHECKED
+      ' bash "$REPO_ROOT/.zcrew/lib/multiplexer.sh"
+  )" || { clear_mx_backend_state; return 1; }
+
+  # Output must use the @zcrew-name values, not any pane_title.
+  printf '%s\n' "$out" | grep -Fqx $'42\tclaudio' || { clear_mx_backend_state; return 1; }
+  printf '%s\n' "$out" | grep -Fqx $'11\tsam' || { clear_mx_backend_state; return 1; }
+  # Confirm list-panes was called with @zcrew-name in the format (not pane_title).
+  grep -Fq "list-panes" "$args_file" || { clear_mx_backend_state; return 1; }
+  grep -Fq "@zcrew-name" "$args_file" || { clear_mx_backend_state; return 1; }
+  clear_mx_backend_state
+}
+
 test_xmx_nb_send_tmux_uses_bracketed_paste_and_cr() {
   local d mockbin args_file out start_ns end_ns elapsed_ms
   local payload
@@ -6099,9 +6177,12 @@ main() {
   run_test "xmx-kb) tmux spawn sets pane title after split-window" test_xmx_kb_spawn_tmux_sets_pane_title_after_spawn
   run_test "xmx-kc) tmux spawn tiles layout after split-window" test_xmx_kc_spawn_tmux_tiles_layout_after_spawn
   run_test "xmx-l) tmux close kills % pane target" test_xmx_l_close_tmux_kill_pane_with_pct_prefix
+  run_test "xmx-kd) tmux spawn sets @zcrew-name on new pane" test_xmx_kd_spawn_tmux_sets_zcrew_name
   run_test "xmx-m) tmux list strips % from live pane ids" test_xmx_m_list_tmux_strips_percent_from_all_ids
   run_test "xmx-n) tmux rename uses select-pane -T" test_xmx_n_rename_tmux_select_pane_T
+  run_test "xmx-nc) tmux rename sets @zcrew-name pane option" test_xmx_nc_rename_tmux_sets_zcrew_name
   run_test "xmx-nb) tmux send-text uses bracketed paste, settle delay, and literal CR" test_xmx_nb_send_tmux_uses_bracketed_paste_and_cr
+  run_test "xmx-oc) tmux list-panes reads @zcrew-name as identity field" test_xmx_oc_list_tmux_uses_zcrew_name_format
   run_test "xmx-o) tmux claim uses stripped TMUX_PANE" test_xmx_o_claim_uses_tmux_pane_stripped
   run_test "xmx-p) tmux stale session check hard-errors" test_xmx_p_session_check_tmux_stale_hard_errors
   run_test "xmx-q) tmux headless transport matrix" test_xmx_q_tmux_transport_text_matrix

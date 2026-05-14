@@ -289,6 +289,51 @@ PY
   return "$status"
 }
 
+# tmux-int-d2: mx_rename_pane sets @zcrew-name custom pane option
+test_tmux_int_d2_rename_sets_zcrew_name() {
+  local pane_id val
+  pane_id="$(tmux -S "$TMUX_SOCK" list-panes -t "$TMUX_SESSION" -F '#{pane_id}' 2>/dev/null | head -1 || true)"
+  pane_id="${pane_id#%}"
+  [[ -n "$pane_id" ]] || return 1
+
+  (
+    export TMUX="$TMUX_SOCK,0,0"
+    export TMUX_PANE="%$pane_id"
+    unset ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID BASH_ENV ENV REGISTRY_FILE PROJECT_DIR _MX_BACKEND _MX_BACKEND_CHECKED
+    source "$REPO_ROOT/.zcrew/lib/multiplexer.sh"
+    mx_rename_pane "$pane_id" "test-zcrew-name"
+  ) || return 1
+
+  val="$(tmux -S "$TMUX_SOCK" show-options -p -v -t "%$pane_id" @zcrew-name 2>/dev/null || true)"
+  tmux -S "$TMUX_SOCK" set-option -p -u -t "%$pane_id" @zcrew-name 2>/dev/null || true
+  [[ "$val" == "test-zcrew-name" ]]
+}
+
+# tmux-int-l: @zcrew-name survives TUI title clobber — the core identity fix.
+# Sets @zcrew-name on a pane, then overwrites pane_title to simulate a TUI.
+# mx_list_panes must return the @zcrew-name, not the clobbered pane_title.
+test_tmux_int_l_zcrew_name_survives_title_clobber() {
+  local pane_id identity
+  pane_id="$(tmux -S "$TMUX_SOCK" list-panes -t "$TMUX_SESSION" -F '#{pane_id}' 2>/dev/null | head -1 || true)"
+  pane_id="${pane_id#%}"
+  [[ -n "$pane_id" ]] || return 1
+
+  tmux -S "$TMUX_SOCK" set-option -p -t "%$pane_id" @zcrew-name "zcrew-worker-l" || return 1
+  # Simulate a TUI overwriting the visible pane title.
+  tmux -S "$TMUX_SOCK" select-pane -t "%$pane_id" -T "tui-clobbered-title" 2>/dev/null || true
+
+  identity="$(
+    export TMUX="$TMUX_SOCK,0,0"
+    export TMUX_PANE="%$pane_id"
+    unset ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID BASH_ENV ENV REGISTRY_FILE PROJECT_DIR _MX_BACKEND _MX_BACKEND_CHECKED
+    source "$REPO_ROOT/.zcrew/lib/multiplexer.sh"
+    mx_list_panes | awk -F'\t' -v id="$pane_id" '$1==id {print $2}'
+  )"
+
+  tmux -S "$TMUX_SOCK" set-option -p -u -t "%$pane_id" @zcrew-name 2>/dev/null || true
+  [[ "$identity" == "zcrew-worker-l" ]]
+}
+
 # tmux-int-i: mx_send_text submits with extended keys disabled
 test_tmux_int_i_send_text_submits_extended_keys_off() {
   tmux_send_text_submits "off" "xterm" "0"
@@ -323,11 +368,13 @@ if tmux_probe; then
   run_test "tmux-int-a: session name resolves" test_tmux_int_a_session_name
   run_test "tmux-int-b: list panes returns >=1" test_tmux_int_b_list_panes
   run_test "tmux-int-c: spawn pane visible" test_tmux_int_c_pane_spawn_visible
-  run_test "tmux-int-d: rename pane" test_tmux_int_d_pane_rename
+  run_test "tmux-int-d: rename pane (human title)" test_tmux_int_d_pane_rename
+  run_test "tmux-int-d2: mx_rename_pane sets @zcrew-name" test_tmux_int_d2_rename_sets_zcrew_name
   run_test "tmux-int-e: init+register roundtrip" test_tmux_int_e_init_register_roundtrip
   run_test "tmux-int-f: list shows pane" test_tmux_int_f_list_shows_pane
   run_test "tmux-int-g: no live audit.log contamination" test_tmux_int_g_no_live_audit_contamination
   run_test "tmux-int-h: register then unregister" test_tmux_int_h_register_unregister_clean
+  run_test "tmux-int-l: @zcrew-name survives TUI title clobber" test_tmux_int_l_zcrew_name_survives_title_clobber
   run_test "tmux-int-i: send-text submits with extended-keys off" test_tmux_int_i_send_text_submits_extended_keys_off
   run_test "tmux-int-j: send-text submits with extended-keys xterm Ext 2" test_tmux_int_j_send_text_submits_extended_keys_xterm
   run_test "tmux-int-k: send-text submits with extended-keys csi-u Ext 2" test_tmux_int_k_send_text_submits_extended_keys_csi_u
