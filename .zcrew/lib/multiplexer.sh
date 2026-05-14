@@ -230,7 +230,12 @@ mx_send_text() {
       zellij action write 13 --pane-id "$1"
       ;;
     tmux)
-      tmux send-keys -t "%$1" -l -- "$(printf '\033[200~%s\033[201~' "$2")"
+      local buffer_name="zcrew-send-$1-$$-$RANDOM"
+      printf '%s' "$2" | tmux load-buffer -b "$buffer_name" -
+      tmux paste-buffer -p -r -d -b "$buffer_name" -t "%$1" || {
+        tmux delete-buffer -b "$buffer_name" 2>/dev/null || true
+        return 1
+      }
       sleep 0.15
       tmux send-keys -t "%$1" -l -- $'\r'
       ;;
