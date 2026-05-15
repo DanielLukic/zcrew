@@ -2372,25 +2372,74 @@ reconcile_registry_with_live_panes() {
   fi
   now=$(date +%s)
 
-  # Three things at once:
+  # Four things at once:
   # 1) Rebind registered entries by pane title (survives mux restart),
   #    or detach if no title matches. Pane IDs are a cache, not identity.
+  # 1.5) Migrate stale pane-<id> keys in place when paneId still matches a
+  #      live pane with a stable non-empty title.
   # 2) Prune only detached entries when --prune.
-  # 3) Auto-register live panes that aren't in the registry as pane-<id>.
+  # 3) Auto-register live panes that aren't in the registry, preferring the
+  #    live title when it is non-empty and unclaimed.
   registry_write_jq '
     .version = 1
     | .panes = (.panes // {})
+    | (.panes | keys) as $initialPaneKeys
     # Build liveByTitle (first match wins on title collision)
     | ($livePanes | reduce .[] as $p ({}; if has($p.title) then . else .[$p.title] = $p.id end)) as $liveByTitle
+    # Build liveTitleById for paneId-based fallback on synthetic pane-<id> keys.
+    | ($livePanes | reduce .[] as $p ({}; .[$p.id] = ($p.title // ""))) as $liveTitleById
+    # Build winnerTitleById for paneId-based key migration. Duplicate titles
+    # only migrate the first live pane that won liveByTitle.
+    | ($livePanes | reduce .[] as $p (
+        {};
+        if (($p.title // "") != "") and ($liveByTitle[$p.title] == $p.id) then
+          .[$p.id] = $p.title
+        else
+          .
+        end
+      )) as $winnerTitleById
     # Step 1: rebind by title, or detach
     | .panes |= with_entries(
-        if $liveByTitle[(.key)] != null then
-          .value.paneId = $liveByTitle[(.key)]
+        ($liveByTitle[(.key)] // "") as $liveId
+        | if $liveId != ""
+             and (
+               .key == ("pane-" + $liveId)
+               or (($initialPaneKeys | index("pane-" + $liveId)) == null)
+             ) then
+          .value.paneId = $liveId
           | .value.status = "alive"
           | .value.lastSeen = ($now | tonumber)
         else
           .value.status = "detached"
         end
+      )
+    # Step 1.5: migrate stale keys in place when paneId still matches a live
+    # pane with a stable non-empty winning title and the destination key is
+    # not already present.
+    | (.panes | keys) as $paneKeys
+    | .panes |= (
+        to_entries
+        | reduce .[] as $entry (
+            {};
+            ($entry.value.paneId // "") as $paneId
+            |
+            ($liveTitleById | has($paneId)) as $paneIsLive
+            |
+            ($winnerTitleById[($entry.value.paneId // "")] // "") as $winnerTitle
+            | if $entry.key == ("pane-" + $paneId) and $paneIsLive then
+                if $winnerTitle != "" and $entry.key == $winnerTitle then
+                  .[$entry.key] = ($entry.value | .paneId = $paneId | .status = "alive" | .lastSeen = ($now | tonumber))
+                elif $winnerTitle != "" and (($paneKeys | index($winnerTitle)) == null) then
+                  .[$winnerTitle] = ($entry.value | .paneId = $paneId | .status = "alive" | .lastSeen = ($now | tonumber))
+                elif $winnerTitle == "" then
+                  .[$entry.key] = ($entry.value | .paneId = $paneId | .status = "alive" | .lastSeen = ($now | tonumber))
+                else
+                  .[$entry.key] = $entry.value
+                end
+              else
+                .[$entry.key] = $entry.value
+              end
+          )
       )
     # Step 2: prune only detached entries if --prune
     | if $prune == "true" then
@@ -2398,17 +2447,17 @@ reconcile_registry_with_live_panes() {
       else
         .
       end
-    # Step 3: auto-register unknown live panes as pane-<id>
+    # Step 3: auto-register unknown live panes, preferring live titles when
+    # they are non-empty and still unclaimed.
     | . as $root
     | .panes += (
         $livePanes
         | map(select(
             ((.id as $id | ($root.panes | to_entries | map(.value.paneId == $id) | any)) | not)
-            and ((.title as $t | ($root.panes | keys | index($t)) | not))
           ))
-        | map({
-            ("pane-" + .id): {
-              paneId: .id,
+        | map(. as $pane | {
+            ((if (($pane.title // "") != "") and (($root.panes | keys | index($pane.title)) == null) then $pane.title else "pane-" + $pane.id end)): {
+              paneId: $pane.id,
               sessionId: null,
               agent: "unknown",
               projectDir: $projectDir,

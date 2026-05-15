@@ -3667,6 +3667,144 @@ MOCK
   jq -e '.panes | has("goner") | not' "$d/.zcrew/registry.json" >/dev/null || return 1
 }
 
+# Helper: run sync against a tmux mock returning given pane/title pairs.
+# Pairs are "paneId,title" one per line. Title is @zcrew-name value.
+_run_sync_with_tmux_panes() {
+  local d="$1" pairs="$2" prune="${3:-false}"
+  local mockbin="$d/mock-bin"
+  local sync_args=()
+  mkdir -p "$mockbin"
+
+  local list_out="" sess="tsess"
+  while IFS= read -r pair; do
+    [[ -n "$pair" ]] || continue
+    local pid="${pair%,*}" title="${pair#*,}"
+    list_out+="${pid}"$'\x01'"${title}"$'\x01'"${sess}"$'\n'
+  done <<< "$pairs"
+
+  make_mock_multiplexer tmux "$mockbin"
+  if [[ "$prune" == "true" ]]; then
+    sync_args+=(--prune)
+  fi
+
+  ( cd "$d" && env -u BX_INSIDE -u ZELLIJ_SESSION_NAME \
+      PATH="$mockbin:$PATH" \
+      TMUX=/tmp/tmux.sock,123,0 \
+      TMUX_PANE=%99 \
+      MOCK_TMUX_LIST_OUTPUT="$list_out" \
+      MOCK_TMUX_SESSION_NAME="$sess" \
+      "$ZCREW_BIN" sync "${sync_args[@]}" >/dev/null 2>&1
+  )
+}
+
+test_kma_paneid_key_migrates_to_zcrew_name() {
+  local d
+  d="$(new_test_dir kma)"
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  jq --arg cwd "$d" '
+    .panes = {
+      "pane-127": {
+        paneId: "127", sessionId: "s1", agent: "claude",
+        cwd: $cwd, pid: 100, lastSeen: 1, status: "alive"
+      }
+    }
+  ' "$d/.zcrew/registry.json" > "$d/tmp.json" && mv "$d/tmp.json" "$d/.zcrew/registry.json"
+
+  _run_sync_with_tmux_panes "$d" $'127,claudio\n'
+
+  jq -e '.panes.claudio.paneId == "127" and .panes.claudio.agent == "claude" and .panes.claudio.status == "alive"' "$d/.zcrew/registry.json" >/dev/null || return 1
+  jq -e '.panes | has("pane-127") | not' "$d/.zcrew/registry.json" >/dev/null || return 1
+}
+
+test_kmb_destination_key_clash_preserved() {
+  local d
+  d="$(new_test_dir kmb)"
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  jq --arg cwd "$d" '
+    .panes = {
+      "claudio": {
+        paneId: "555", sessionId: "s1", agent: "pi",
+        cwd: $cwd, pid: 99, lastSeen: 1, status: "alive"
+      },
+      "pane-127": {
+        paneId: "127", sessionId: "s2", agent: "claude",
+        cwd: $cwd, pid: 100, lastSeen: 1, status: "alive"
+      }
+    }
+  ' "$d/.zcrew/registry.json" > "$d/tmp.json" && mv "$d/tmp.json" "$d/.zcrew/registry.json"
+
+  _run_sync_with_tmux_panes "$d" $'127,claudio\n'
+
+  jq -e '.panes.claudio.paneId == "555" and .panes.claudio.agent == "pi"' "$d/.zcrew/registry.json" >/dev/null || return 1
+  [[ "$(jq -r '.panes["pane-127"].status' "$d/.zcrew/registry.json")" == "detached" ]] || return 1
+}
+
+test_kmc_empty_title_stays_paneid() {
+  local d
+  d="$(new_test_dir kmc)"
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  jq --arg cwd "$d" '
+    .panes = {
+      "pane-44": {
+        paneId: "44", sessionId: "s1", agent: "codex",
+        cwd: $cwd, pid: 10, lastSeen: 1, status: "alive"
+      }
+    }
+  ' "$d/.zcrew/registry.json" > "$d/tmp.json" && mv "$d/tmp.json" "$d/.zcrew/registry.json"
+
+  _run_sync_with_tmux_panes "$d" $'44,\n'
+
+  jq -e '.panes["pane-44"].paneId == "44" and .panes["pane-44"].status == "alive"' "$d/.zcrew/registry.json" >/dev/null || return 1
+  jq -e '.panes | has("") | not' "$d/.zcrew/registry.json" >/dev/null || return 1
+}
+
+test_kmd_duplicate_title_first_wins() {
+  local d
+  d="$(new_test_dir kmd)"
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  jq --arg cwd "$d" '
+    .panes = {
+      "pane-10": {
+        paneId: "10", sessionId: "s1", agent: "codex",
+        cwd: $cwd, pid: 1, lastSeen: 1, status: "alive"
+      },
+      "pane-20": {
+        paneId: "20", sessionId: "s2", agent: "pi",
+        cwd: $cwd, pid: 2, lastSeen: 1, status: "alive"
+      }
+    }
+  ' "$d/.zcrew/registry.json" > "$d/tmp.json" && mv "$d/tmp.json" "$d/.zcrew/registry.json"
+
+  _run_sync_with_tmux_panes "$d" $'10,dupe\n20,dupe\n'
+
+  jq -e '.panes.dupe.paneId == "10" and .panes.dupe.agent == "codex"' "$d/.zcrew/registry.json" >/dev/null || return 1
+  [[ "$(jq -r '.panes["pane-20"].status' "$d/.zcrew/registry.json")" == "alive" ]] || return 1
+}
+
+test_kme_prune_drops_detached_after_migration() {
+  local d
+  d="$(new_test_dir kme)"
+  zcrew_cmd "$d" init >/dev/null 2>&1 || return 1
+  jq --arg cwd "$d" '
+    .panes = {
+      "pane-5": {
+        paneId: "5", sessionId: "s1", agent: "claude",
+        cwd: $cwd, pid: 1, lastSeen: 1, status: "alive"
+      },
+      "goner": {
+        paneId: "999", sessionId: "s0", agent: "pi",
+        cwd: $cwd, pid: 0, lastSeen: 1, status: "alive"
+      }
+    }
+  ' "$d/.zcrew/registry.json" > "$d/tmp.json" && mv "$d/tmp.json" "$d/.zcrew/registry.json"
+
+  _run_sync_with_tmux_panes "$d" $'5,worker5\n' true
+
+  jq -e '.panes.worker5.paneId == "5" and .panes.worker5.status == "alive"' "$d/.zcrew/registry.json" >/dev/null || return 1
+  jq -e '.panes | has("pane-5") | not' "$d/.zcrew/registry.json" >/dev/null || return 1
+  jq -e '.panes | has("goner") | not' "$d/.zcrew/registry.json" >/dev/null || return 1
+}
+
 test_25_skill_passthrough_forwards_arguments() {
   grep -Fqx '!`zcrew list $ARGUMENTS`' "$REPO_ROOT/.claude/skills/zpanes/SKILL.md" || return 1
   grep -Fqx '!`zcrew sync $ARGUMENTS`' "$REPO_ROOT/.claude/skills/zsync/SKILL.md"
@@ -6723,6 +6861,11 @@ main() {
   run_test "tfd704-p2b) floating pane rebinds after mux restart" test_tfd704_p2b_floating_title_rebind
   run_test "tfd704-p2c) tiled panes still enumerate (JSON regression)" test_tfd704_p2c_tiled_still_enumerates
   run_test "tfd704-p2d) JSON skips plugin and exited panes" test_tfd704_p2d_exited_and_plugins_skipped
+  run_test "kma) pane-id key migrates to @zcrew-name" test_kma_paneid_key_migrates_to_zcrew_name
+  run_test "kmb) destination key clash preserves existing entry" test_kmb_destination_key_clash_preserved
+  run_test "kmc) empty @zcrew-name stays pane-id keyed" test_kmc_empty_title_stays_paneid
+  run_test "kmd) duplicate title first-wins, second pane-id" test_kmd_duplicate_title_first_wins
+  run_test "kme) prune drops detached after key migration" test_kme_prune_drops_detached_after_migration
   run_test "25) zpanes and zsync skills forward \$ARGUMENTS" test_25_skill_passthrough_forwards_arguments
   run_test "26) auto-sync overhead stays under 100ms" test_26_auto_sync_timing_under_100ms
   run_test "27) install writes managed .bx and .zcrew gitignores" test_27_install_writes_managed_gitignores
