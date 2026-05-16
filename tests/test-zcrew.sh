@@ -6705,7 +6705,7 @@ test_ci_10_claim_dedups_named_caller_entry_and_inherits_metadata() {
   jq -e '.panes.main.agent == "codex"' "$d/.zcrew/registry.json" >/dev/null || return 1
 }
 
-test_107_setup_macos_colima_rejects_non_darwin() {
+test_107_setup_macos_base_rejects_non_darwin() {
   local d mockbin out
   d="$(new_test_dir 107)"
   mockbin="$d/mock-bin"
@@ -6717,14 +6717,14 @@ printf 'Linux\n'
 MOCK
   chmod +x "$mockbin/uname"
 
-  if out="$(cd "$REPO_ROOT" && PATH="$mockbin:$PATH" bash ./setup-macos-colima.sh 2>&1)"; then
+  if out="$(cd "$REPO_ROOT" && PATH="$mockbin:$PATH" bash ./setup-macos-base.sh 2>&1)"; then
     return 1
   fi
 
   printf '%s\n' "$out" | grep -Fq 'only runs on macOS hosts'
 }
 
-test_107b_setup_macos_colima_dry_run_emits_expected_commands() {
+test_107b_setup_macos_base_dry_run_emits_expected_commands() {
   local d mockbin out
   d="$(new_test_dir 107b)"
   mockbin="$d/mock-bin"
@@ -6737,44 +6737,49 @@ case "${1:-}" in
   *) printf 'Darwin\n' ;;
 esac
 MOCK
-  cat > "$mockbin/colima" <<'MOCK'
+  cat > "$mockbin/limactl" <<'MOCK'
 #!/usr/bin/env bash
 case "${1:-}" in
   list) exit 0 ;;
-  *) echo "unexpected colima call: $*" >&2; exit 1 ;;
+  *) echo "unexpected limactl call: $*" >&2; exit 1 ;;
 esac
 MOCK
-  chmod +x "$mockbin/uname" "$mockbin/colima"
+  chmod +x "$mockbin/uname" "$mockbin/limactl"
 
-  out="$(cd "$REPO_ROOT" && PATH="$mockbin:$PATH" HOME=/Users/dl USER=dl bash ./setup-macos-colima.sh --dry-run 2>&1)" || return 1
+  out="$(cd "$REPO_ROOT" && PATH="$mockbin:$PATH" HOME=/Users/dl USER=dl bash ./setup-macos-base.sh --dry-run 2>&1)" || return 1
 
-  printf '%s\n' "$out" | grep -Fq 'mkdir -p'
-  printf '%s\n' "$out" | grep -Fq 'colima start --profile zcrew --runtime containerd --cpu 4 --memory 8 --disk 60 --vm-type vz'
-  printf '%s\n' "$out" | grep -Fq 'colima ssh --profile zcrew -- bash -s'
-  printf '%s\n' "$out" | grep -Fq 'colima ssh --profile zcrew'
+  printf '%s\n' "$out" | grep -Fq 'limactl start --name=zcrew-base --tty=false --vm-type=vz --mount-type=virtiofs --mount-none template:ubuntu'
+  printf '%s\n' "$out" | grep -Fq 'limactl shell --workdir /tmp zcrew-base sudo test -f /var/lib/zcrew-base/version-1'
+  printf '%s\n' "$out" | grep -Fq 'limactl stop zcrew-base'
 }
 
-test_107c_setup_macos_colima_rejects_projects_root_outside_user_home() {
-  local d mockbin out
+test_107c_setup_macos_base_rebuild_deletes_existing_instance() {
+  local d mockbin out args_file
   d="$(new_test_dir 107c)"
   mockbin="$d/mock-bin"
+  args_file="$d/limactl-args.txt"
   mkdir -p "$mockbin"
 
   cat > "$mockbin/uname" <<'MOCK'
 #!/usr/bin/env bash
 printf 'Darwin\n'
 MOCK
-  cat > "$mockbin/colima" <<'MOCK'
+  cat > "$mockbin/limactl" <<'MOCK'
 #!/usr/bin/env bash
-exit 0
+set -euo pipefail
+printf '%s\n' "$*" >> "$MOCK_LIMACTL_ARGS_FILE"
+case "${1:-}" in
+  list)
+    printf 'NAME    STATUS\nzcrew-base    Stopped\n'
+    ;;
+  *)
+    ;;
+esac
 MOCK
-  chmod +x "$mockbin/uname" "$mockbin/colima"
+  chmod +x "$mockbin/uname" "$mockbin/limactl"
 
-  if out="$(cd "$REPO_ROOT" && PATH="$mockbin:$PATH" USER=dl bash ./setup-macos-colima.sh --dry-run --projects-root /tmp/projects 2>&1)"; then
-    return 1
-  fi
-
-  printf '%s\n' "$out" | grep -Fq 'projects root must live under /Users/dl'
+  out="$(cd "$REPO_ROOT" && PATH="$mockbin:$PATH" MOCK_LIMACTL_ARGS_FILE="$args_file" bash ./setup-macos-base.sh --rebuild --dry-run 2>&1)" || return 1
+  printf '%s\n' "$out" | grep -Fq 'limactl delete --force zcrew-base'
 }
 
 test_108_zcrew_mac_rejects_non_darwin() {
@@ -6797,36 +6802,108 @@ MOCK
 }
 
 test_108b_zcrew_mac_enters_running_profile_and_project_path() {
-  local d mockbin args_file
+  local d mockbin args_file project expected_vm
   d="$(new_test_dir 108b)"
   mockbin="$d/mock-bin"
-  args_file="$d/colima-args.txt"
+  args_file="$d/limactl-args.txt"
+  project="$d/demo"
+  mkdir -p "$project"
+  expected_vm="zcrew-demo-$(printf '%s' "$(realpath "$project")" | shasum -a 256 | awk '{print substr($1,1,8)}')"
   mkdir -p "$mockbin"
 
   cat > "$mockbin/uname" <<'MOCK'
 #!/usr/bin/env bash
 printf 'Darwin\n'
 MOCK
-  cat > "$mockbin/colima" <<'MOCK'
+  cat > "$mockbin/limactl" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
 case "${1:-}" in
   list)
-    printf 'PROFILE    STATUS\nzcrew      Running\n'
+    printf 'NAME    STATUS\nzcrew-base    Stopped\n'
     ;;
-  ssh)
-    printf '%s\n' "$*" > "$MOCK_COLIMA_ARGS_FILE"
+  clone)
+    printf '%s\n' "$*" >> "$MOCK_LIMACTL_ARGS_FILE"
+    ;;
+  shell)
+    printf '%s\n' "$*" >> "$MOCK_LIMACTL_ARGS_FILE"
     ;;
   *)
     exit 1
     ;;
 esac
 MOCK
-  chmod +x "$mockbin/uname" "$mockbin/colima"
+  chmod +x "$mockbin/uname" "$mockbin/limactl"
 
-  ( cd "$REPO_ROOT" && PATH="$mockbin:$PATH" USER=dl MOCK_COLIMA_ARGS_FILE="$args_file" bash ./bin/zcrew-mac /Users/dl/Projects/demo ) || return 1
+  ( cd "$REPO_ROOT" && PATH="$mockbin:$PATH" USER=dl MOCK_LIMACTL_ARGS_FILE="$args_file" bash ./bin/zcrew-mac enter "$project" ) || return 1
 
-  grep -Fq 'ssh --profile zcrew -- env ZCREW_MAC_PROJECT_DIR=/Users/dl/Projects/demo bash -lc cd "$ZCREW_MAC_PROJECT_DIR" && exec bash -l' "$args_file"
+  grep -Fq "clone zcrew-base $expected_vm --tty=false --mount-type=virtiofs --mount-only ${project}:w" "$args_file"
+  grep -Fq "shell --start --workdir $project $expected_vm" "$args_file"
+}
+
+test_108c_zcrew_mac_install_dry_run_shows_clone_and_install_steps() {
+  local d mockbin out project expected_vm
+  d="$(new_test_dir 108c)"
+  mockbin="$d/mock-bin"
+  project="$d/demo"
+  mkdir -p "$project"
+  expected_vm="zcrew-demo-$(printf '%s' "$(realpath "$project")" | shasum -a 256 | awk '{print substr($1,1,8)}')"
+  mkdir -p "$mockbin"
+
+  cat > "$mockbin/uname" <<'MOCK'
+#!/usr/bin/env bash
+printf 'Darwin\n'
+MOCK
+  cat > "$mockbin/limactl" <<'MOCK'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    printf 'NAME    STATUS\nzcrew-base    Stopped\n'
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+MOCK
+  chmod +x "$mockbin/uname" "$mockbin/limactl"
+
+  out="$(cd "$REPO_ROOT" && PATH="$mockbin:$PATH" USER=dl bash ./bin/zcrew-mac --dry-run install "$project" 2>&1)" || return 1
+
+  printf '%s\n' "$out" | grep -Fq "limactl clone zcrew-base $expected_vm --tty=false --mount-type=virtiofs --mount-only $project:w"
+  printf '%s\n' "$out" | grep -Fq "tar -C"
+  printf '%s\n' "$out" | grep -Fq "limactl shell --start --workdir $project $expected_vm"
+}
+
+test_108d_zcrew_mac_hashes_same_basename_paths_differently() {
+  local d mockbin out_a out_b
+  d="$(new_test_dir 108d)"
+  mockbin="$d/mock-bin"
+  mkdir -p "$mockbin"
+
+  cat > "$mockbin/uname" <<'MOCK'
+#!/usr/bin/env bash
+printf 'Darwin\n'
+MOCK
+  cat > "$mockbin/limactl" <<'MOCK'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    printf 'NAME    STATUS\nzcrew-base    Stopped\n'
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+MOCK
+  chmod +x "$mockbin/uname" "$mockbin/limactl"
+
+  mkdir -p /tmp/zcrew-path-a/foo /tmp/zcrew-path-b/foo
+  out_a="$(cd "$REPO_ROOT" && PATH="$mockbin:$PATH" bash ./bin/zcrew-mac --dry-run enter /tmp/zcrew-path-a/foo 2>&1)" || return 1
+  out_b="$(cd "$REPO_ROOT" && PATH="$mockbin:$PATH" bash ./bin/zcrew-mac --dry-run enter /tmp/zcrew-path-b/foo 2>&1)" || return 1
+
+  [[ "$out_a" == *'zcrew-foo-'* ]] || return 1
+  [[ "$out_b" == *'zcrew-foo-'* ]] || return 1
+  [[ "$out_a" != "$out_b" ]]
 }
 
 
@@ -7130,11 +7207,13 @@ main() {
   run_test "ci-8b) claim retitles foreign main to pane-id fallback when no registry entry" test_ci_8b_claim_retitles_foreign_main_to_pane_id_fallback
   run_test "ci-9) claim merges caller metadata and removes old key (no duplicate)" test_ci_9_claim_merges_caller_metadata_and_removes_old_key
   run_test "ci-10) claim dedups named caller entry and inherits metadata" test_ci_10_claim_dedups_named_caller_entry_and_inherits_metadata
-  run_test "107) setup-macos-colima rejects non-darwin hosts" test_107_setup_macos_colima_rejects_non_darwin
-  run_test "107b) setup-macos-colima dry-run emits bootstrap commands" test_107b_setup_macos_colima_dry_run_emits_expected_commands
-  run_test "107c) setup-macos-colima rejects unsupported projects roots" test_107c_setup_macos_colima_rejects_projects_root_outside_user_home
+  run_test "107) setup-macos-base rejects non-darwin hosts" test_107_setup_macos_base_rejects_non_darwin
+  run_test "107b) setup-macos-base dry-run emits bootstrap commands" test_107b_setup_macos_base_dry_run_emits_expected_commands
+  run_test "107c) setup-macos-base rebuild deletes existing instance" test_107c_setup_macos_base_rebuild_deletes_existing_instance
   run_test "108) zcrew-mac rejects non-darwin hosts" test_108_zcrew_mac_rejects_non_darwin
   run_test "108b) zcrew-mac enters running profile at project path" test_108b_zcrew_mac_enters_running_profile_and_project_path
+  run_test "108c) zcrew-mac install dry-run shows clone and install steps" test_108c_zcrew_mac_install_dry_run_shows_clone_and_install_steps
+  run_test "108d) zcrew-mac hashes same-basename paths differently" test_108d_zcrew_mac_hashes_same_basename_paths_differently
   run_test "106) clone-mode install still materializes local tooling + skills" test_106_clone_mode_install_materializes_local_layout
 
   echo ""

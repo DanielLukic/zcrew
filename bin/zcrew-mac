@@ -2,25 +2,32 @@
 set -euo pipefail
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
-  echo "zcrew-mac only runs on macOS hosts. zcrew itself stays Linux-only inside Colima." >&2
+  echo "zcrew-mac only runs on macOS hosts. zcrew itself stays Linux-only inside Lima." >&2
   exit 1
 fi
 
 usage() {
   cat <<'EOF'
-Usage: zcrew-mac [options] [project-path]
+Usage: zcrew-mac [--dry-run] [subcommand] [project-path]
 
-Open a shell inside the Colima VM used for zcrew development.
+Subcommands:
+  install <project-path>  Clone the base VM, mount the project, run zcrew install, then enter
+  enter <project-path>    Start the project VM if needed and enter a shell at the project path
+  stop <project-path>     Stop the project VM
+  destroy <project-path>  Delete the project VM
+  list                    Show zcrew-* Lima instances
 
-Options:
-  --profile NAME  Colima profile name (default: zcrew)
-  -h, --help      Show this help
+If no subcommand is given, `enter` is assumed.
 EOF
 }
 
 die() {
   printf 'zcrew-mac: %s\n' "$*" >&2
   exit 1
+}
+
+log() {
+  printf '==> %s\n' "$*"
 }
 
 expand_path() {
@@ -33,59 +40,152 @@ expand_path() {
   esac
 }
 
-PROFILE="zcrew"
-PROJECT_PATH=""
+run_cmd() {
+  if [[ "$DRY_RUN" == "true" ]]; then
+    printf '+'
+    printf ' %q' "$@"
+    printf '\n'
+    return 0
+  fi
+  "$@"
+}
+
+instance_exists() {
+  limactl list 2>/dev/null | awk 'NR > 1 {print $1}' | grep -Fxq "$1"
+}
+
+require_lima() {
+  command -v limactl >/dev/null 2>&1 || die "lima is not installed. Run brew install lima and ./setup-macos-base.sh first."
+}
+
+require_base() {
+  instance_exists "$BASE_INSTANCE" || die "base instance '$BASE_INSTANCE' does not exist. Run ./setup-macos-base.sh first."
+}
+
+sanitize_basename() {
+  local base="$1"
+  base="$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//; s/-+/-/g')"
+  [[ -n "$base" ]] || base="project"
+  printf '%s\n' "$base"
+}
+
+project_vm_name() {
+  local abs_path="$1"
+  local base hash
+  base="$(sanitize_basename "$(basename "$abs_path")")"
+  hash="$(printf '%s' "$abs_path" | shasum -a 256 | awk '{print substr($1,1,8)}')"
+  printf 'zcrew-%s-%s\n' "$base" "$hash"
+}
+
+resolve_project_path() {
+  local raw="${1:-}"
+  if [[ -z "$raw" ]]; then
+    raw="$PWD"
+  fi
+  PROJECT_PATH="$(expand_path "$raw")"
+  [[ -d "$PROJECT_PATH" ]] || die "project path does not exist: $PROJECT_PATH"
+}
+
+ensure_project_vm() {
+  if instance_exists "$VM_NAME"; then
+    return 0
+  fi
+  log "Cloning '$BASE_INSTANCE' into '$VM_NAME'"
+  run_cmd limactl clone "$BASE_INSTANCE" "$VM_NAME" --tty=false --mount-type=virtiofs --mount-only "${PROJECT_PATH}:w"
+}
+
+install_project_inside_vm() {
+  local repo_root tmp_dir install_cmd
+  repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  tmp_dir="/tmp/zcrew-src-$$"
+  install_cmd="set -euo pipefail; rm -rf '$tmp_dir'; mkdir -p '$tmp_dir'; tar -C '$tmp_dir' -xf -; cd '$tmp_dir'; ./.zcrew/bin/zcrew install '$PROJECT_PATH'"
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    printf '+ tar -C %q -cf - . | limactl shell --start --workdir /tmp %q bash -lc %q\n' "$repo_root" "$VM_NAME" "$install_cmd"
+    return 0
+  fi
+
+  ( cd "$repo_root" && tar -cf - . ) | limactl shell --start --workdir /tmp "$VM_NAME" bash -lc "$install_cmd"
+}
+
+enter_project_vm() {
+  run_cmd limactl shell --start --workdir "$PROJECT_PATH" "$VM_NAME"
+}
+
+stop_project_vm() {
+  instance_exists "$VM_NAME" || die "project VM '$VM_NAME' does not exist"
+  run_cmd limactl stop "$VM_NAME"
+}
+
+destroy_project_vm() {
+  instance_exists "$VM_NAME" || die "project VM '$VM_NAME' does not exist"
+  run_cmd limactl delete --force "$VM_NAME"
+}
+
+list_project_vms() {
+  if [[ "$DRY_RUN" == "true" ]]; then
+    printf '+ limactl list | awk ...\n'
+    return 0
+  fi
+  limactl list | awk 'NR == 1 || $1 ~ /^zcrew-/ {print}'
+}
+
+BASE_INSTANCE="zcrew-base"
+DRY_RUN="false"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --profile)
-      PROFILE="${2:-}"
-      [[ -n "$PROFILE" ]] || die "--profile requires a value"
-      shift 2
+    --dry-run)
+      DRY_RUN="true"
+      shift
       ;;
     -h|--help)
       usage
       exit 0
       ;;
-    --)
-      shift
-      break
-      ;;
-    -*)
-      die "unknown option: $1"
-      ;;
     *)
-      PROJECT_PATH="$1"
-      shift
       break
       ;;
   esac
 done
 
+SUBCOMMAND="${1:-enter}"
 if [[ $# -gt 0 ]]; then
-  die "unexpected arguments: $*"
+  shift
 fi
 
-if ! command -v colima >/dev/null 2>&1; then
-  die "colima is not installed. Run setup-macos-colima.sh first."
-fi
+require_lima
 
-status="$(colima list 2>/dev/null | awk -v profile="$PROFILE" '$1 == profile { print $2; exit }')"
-if [[ "$status" != "Running" ]]; then
-  die "Colima profile '$PROFILE' is not running. Run setup-macos-colima.sh first."
-fi
+case "$SUBCOMMAND" in
+  install|enter|stop|destroy)
+    require_base
+    resolve_project_path "${1:-}"
+    VM_NAME="$(project_vm_name "$PROJECT_PATH")"
+    ;;
+  list)
+    ;;
+  *)
+    die "unknown subcommand: $SUBCOMMAND"
+    ;;
+esac
 
-if [[ -z "$PROJECT_PATH" && "$PWD" == /Users/"$USER"/* ]]; then
-  PROJECT_PATH="$PWD"
-fi
-
-if [[ -n "$PROJECT_PATH" ]]; then
-  PROJECT_PATH="$(expand_path "$PROJECT_PATH")"
-  if [[ "$PROJECT_PATH" != /Users/"$USER"/* && "$PROJECT_PATH" != /Users/"$USER" ]]; then
-    die "project path must live under /Users/$USER for the same-path Colima happy path."
-  fi
-  # shellcheck disable=SC2016 # $ZCREW_MAC_PROJECT_DIR must expand inside the VM, not locally
-  exec colima ssh --profile "$PROFILE" -- env ZCREW_MAC_PROJECT_DIR="$PROJECT_PATH" bash -lc 'cd "$ZCREW_MAC_PROJECT_DIR" && exec bash -l'
-fi
-
-exec colima ssh --profile "$PROFILE"
+case "$SUBCOMMAND" in
+  install)
+    ensure_project_vm
+    install_project_inside_vm
+    enter_project_vm
+    ;;
+  enter)
+    ensure_project_vm
+    enter_project_vm
+    ;;
+  stop)
+    stop_project_vm
+    ;;
+  destroy)
+    destroy_project_vm
+    ;;
+  list)
+    list_project_vms
+    ;;
+esac
