@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  echo "zcrew-mac only runs on macOS hosts. zcrew itself stays Linux-only inside Colima." >&2
+  exit 1
+fi
+
+usage() {
+  cat <<'EOF'
+Usage: zcrew-mac [options] [project-path]
+
+Open a shell inside the Colima VM used for zcrew development.
+
+Options:
+  --profile NAME  Colima profile name (default: zcrew)
+  -h, --help      Show this help
+EOF
+}
+
+die() {
+  printf 'zcrew-mac: %s\n' "$*" >&2
+  exit 1
+}
+
+expand_path() {
+  local path="$1"
+  case "$path" in
+    "~") printf '%s\n' "$HOME" ;;
+    ~/*) printf '%s\n' "$HOME/${path#~/}" ;;
+    /*) printf '%s\n' "$path" ;;
+    *) printf '%s\n' "$PWD/$path" ;;
+  esac
+}
+
+PROFILE="zcrew"
+PROJECT_PATH=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --profile)
+      PROFILE="${2:-}"
+      [[ -n "$PROFILE" ]] || die "--profile requires a value"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      die "unknown option: $1"
+      ;;
+    *)
+      PROJECT_PATH="$1"
+      shift
+      break
+      ;;
+  esac
+done
+
+if [[ $# -gt 0 ]]; then
+  die "unexpected arguments: $*"
+fi
+
+if ! command -v colima >/dev/null 2>&1; then
+  die "colima is not installed. Run setup-macos-colima.sh first."
+fi
+
+status="$(colima list 2>/dev/null | awk -v profile="$PROFILE" '$1 == profile { print $2; exit }')"
+if [[ "$status" != "Running" ]]; then
+  die "Colima profile '$PROFILE' is not running. Run setup-macos-colima.sh first."
+fi
+
+if [[ -z "$PROJECT_PATH" && "$PWD" == /Users/"$USER"/* ]]; then
+  PROJECT_PATH="$PWD"
+fi
+
+if [[ -n "$PROJECT_PATH" ]]; then
+  PROJECT_PATH="$(expand_path "$PROJECT_PATH")"
+  if [[ "$PROJECT_PATH" != /Users/"$USER"/* && "$PROJECT_PATH" != /Users/"$USER" ]]; then
+    die "project path must live under /Users/$USER for the same-path Colima happy path."
+  fi
+  # shellcheck disable=SC2016 # $ZCREW_MAC_PROJECT_DIR must expand inside the VM, not locally
+  exec colima ssh --profile "$PROFILE" -- env ZCREW_MAC_PROJECT_DIR="$PROJECT_PATH" bash -lc 'cd "$ZCREW_MAC_PROJECT_DIR" && exec bash -l'
+fi
+
+exec colima ssh --profile "$PROFILE"

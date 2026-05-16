@@ -6705,6 +6705,130 @@ test_ci_10_claim_dedups_named_caller_entry_and_inherits_metadata() {
   jq -e '.panes.main.agent == "codex"' "$d/.zcrew/registry.json" >/dev/null || return 1
 }
 
+test_107_setup_macos_colima_rejects_non_darwin() {
+  local d mockbin out
+  d="$(new_test_dir 107)"
+  mockbin="$d/mock-bin"
+  mkdir -p "$mockbin"
+
+  cat > "$mockbin/uname" <<'MOCK'
+#!/usr/bin/env bash
+printf 'Linux\n'
+MOCK
+  chmod +x "$mockbin/uname"
+
+  if out="$(cd "$REPO_ROOT" && PATH="$mockbin:$PATH" bash ./setup-macos-colima.sh 2>&1)"; then
+    return 1
+  fi
+
+  printf '%s\n' "$out" | grep -Fq 'only runs on macOS hosts'
+}
+
+test_107b_setup_macos_colima_dry_run_emits_expected_commands() {
+  local d mockbin out
+  d="$(new_test_dir 107b)"
+  mockbin="$d/mock-bin"
+  mkdir -p "$mockbin"
+
+  cat > "$mockbin/uname" <<'MOCK'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -m) printf 'arm64\n' ;;
+  *) printf 'Darwin\n' ;;
+esac
+MOCK
+  cat > "$mockbin/colima" <<'MOCK'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list) exit 0 ;;
+  *) echo "unexpected colima call: $*" >&2; exit 1 ;;
+esac
+MOCK
+  chmod +x "$mockbin/uname" "$mockbin/colima"
+
+  out="$(cd "$REPO_ROOT" && PATH="$mockbin:$PATH" HOME=/Users/dl USER=dl bash ./setup-macos-colima.sh --dry-run 2>&1)" || return 1
+
+  printf '%s\n' "$out" | grep -Fq 'mkdir -p'
+  printf '%s\n' "$out" | grep -Fq 'colima start --profile zcrew --runtime containerd --cpu 4 --memory 8 --disk 60 --vm-type vz'
+  printf '%s\n' "$out" | grep -Fq 'colima ssh --profile zcrew -- bash -s'
+  printf '%s\n' "$out" | grep -Fq 'colima ssh --profile zcrew'
+}
+
+test_107c_setup_macos_colima_rejects_projects_root_outside_user_home() {
+  local d mockbin out
+  d="$(new_test_dir 107c)"
+  mockbin="$d/mock-bin"
+  mkdir -p "$mockbin"
+
+  cat > "$mockbin/uname" <<'MOCK'
+#!/usr/bin/env bash
+printf 'Darwin\n'
+MOCK
+  cat > "$mockbin/colima" <<'MOCK'
+#!/usr/bin/env bash
+exit 0
+MOCK
+  chmod +x "$mockbin/uname" "$mockbin/colima"
+
+  if out="$(cd "$REPO_ROOT" && PATH="$mockbin:$PATH" USER=dl bash ./setup-macos-colima.sh --dry-run --projects-root /tmp/projects 2>&1)"; then
+    return 1
+  fi
+
+  printf '%s\n' "$out" | grep -Fq 'projects root must live under /Users/dl'
+}
+
+test_108_zcrew_mac_rejects_non_darwin() {
+  local d mockbin out
+  d="$(new_test_dir 108)"
+  mockbin="$d/mock-bin"
+  mkdir -p "$mockbin"
+
+  cat > "$mockbin/uname" <<'MOCK'
+#!/usr/bin/env bash
+printf 'Linux\n'
+MOCK
+  chmod +x "$mockbin/uname"
+
+  if out="$(cd "$REPO_ROOT" && PATH="$mockbin:$PATH" bash ./bin/zcrew-mac 2>&1)"; then
+    return 1
+  fi
+
+  printf '%s\n' "$out" | grep -Fq 'only runs on macOS hosts'
+}
+
+test_108b_zcrew_mac_enters_running_profile_and_project_path() {
+  local d mockbin args_file
+  d="$(new_test_dir 108b)"
+  mockbin="$d/mock-bin"
+  args_file="$d/colima-args.txt"
+  mkdir -p "$mockbin"
+
+  cat > "$mockbin/uname" <<'MOCK'
+#!/usr/bin/env bash
+printf 'Darwin\n'
+MOCK
+  cat > "$mockbin/colima" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  list)
+    printf 'PROFILE    STATUS\nzcrew      Running\n'
+    ;;
+  ssh)
+    printf '%s\n' "$*" > "$MOCK_COLIMA_ARGS_FILE"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+MOCK
+  chmod +x "$mockbin/uname" "$mockbin/colima"
+
+  ( cd "$REPO_ROOT" && PATH="$mockbin:$PATH" USER=dl MOCK_COLIMA_ARGS_FILE="$args_file" bash ./bin/zcrew-mac /Users/dl/Projects/demo ) || return 1
+
+  grep -Fq 'ssh --profile zcrew -- env ZCREW_MAC_PROJECT_DIR=/Users/dl/Projects/demo bash -lc cd "$ZCREW_MAC_PROJECT_DIR" && exec bash -l' "$args_file"
+}
+
 
 main() {
   mkdir -p "$TEST_ROOT"
@@ -7006,6 +7130,11 @@ main() {
   run_test "ci-8b) claim retitles foreign main to pane-id fallback when no registry entry" test_ci_8b_claim_retitles_foreign_main_to_pane_id_fallback
   run_test "ci-9) claim merges caller metadata and removes old key (no duplicate)" test_ci_9_claim_merges_caller_metadata_and_removes_old_key
   run_test "ci-10) claim dedups named caller entry and inherits metadata" test_ci_10_claim_dedups_named_caller_entry_and_inherits_metadata
+  run_test "107) setup-macos-colima rejects non-darwin hosts" test_107_setup_macos_colima_rejects_non_darwin
+  run_test "107b) setup-macos-colima dry-run emits bootstrap commands" test_107b_setup_macos_colima_dry_run_emits_expected_commands
+  run_test "107c) setup-macos-colima rejects unsupported projects roots" test_107c_setup_macos_colima_rejects_projects_root_outside_user_home
+  run_test "108) zcrew-mac rejects non-darwin hosts" test_108_zcrew_mac_rejects_non_darwin
+  run_test "108b) zcrew-mac enters running profile at project path" test_108b_zcrew_mac_enters_running_profile_and_project_path
   run_test "106) clone-mode install still materializes local tooling + skills" test_106_clone_mode_install_materializes_local_layout
 
   echo ""
