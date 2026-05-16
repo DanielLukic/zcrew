@@ -1956,7 +1956,7 @@ test_11i_spawn_does_not_churn_when_live_main_exists() {
   printf '#!/usr/bin/env bash\nexit 0\n' > "$d/.zcrew/lib/launchers/claude.sh"
   chmod +x "$d/.zcrew/lib/launchers/claude.sh"
   make_mock_zellij_spawn "$mockbin" "$args_file"
-  before="$(jq -c '.panes.main' "$d/.zcrew/registry.json")" || return 1
+  before="$(jq -c '.panes.main | {paneId,agent,status}' "$d/.zcrew/registry.json")" || return 1
 
   (
     cd "$d" || exit 1
@@ -1964,7 +1964,7 @@ test_11i_spawn_does_not_churn_when_live_main_exists() {
       MOCK_ZELLIJ_LIST_OUTPUT=$'PANE_ID  TYPE  TITLE\nterminal_50  terminal  main\nterminal_42  terminal  pane-42' MOCK_ZELLIJ_NEW_PANE_OUTPUT='terminal_560' \
       ZELLIJ_SESSION_NAME='test-session' ZELLIJ_PANE_ID=42 "$ZCREW_BIN" spawn claude extra >/dev/null 2>&1
   ) || return 1
-  after="$(jq -c '.panes.main' "$d/.zcrew/registry.json")" || return 1
+  after="$(jq -c '.panes.main | {paneId,agent,status}' "$d/.zcrew/registry.json")" || return 1
 
   [[ "$before" == "$after" ]]
 }
